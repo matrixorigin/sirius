@@ -46,6 +46,7 @@ libprotobuf = "*"
 rust = "*"
 cuda-nvrtc-dev = "*"
 croaring = "*"
+lz4-c = ">=1.10.0,<2"
 
 [pypi-dependencies]
 rumdl = "==0.2.44"
