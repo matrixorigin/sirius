@@ -63,10 +63,12 @@ sirius_prepared_statement_data::sirius_prepared_statement_data(
 
 sirius_interface::sirius_interface(duckdb::ClientContext& client_context,
                                    std::optional<std::string> query_label,
-                                   std::optional<std::string> session_label)
+                                   std::optional<std::string> session_label,
+                                   std::shared_ptr<execution_evidence> evidence)
   : client_context(client_context),
     query_label(std::move(query_label)),
-    session_label(std::move(session_label))
+    session_label(std::move(session_label)),
+    evidence(std::move(evidence))
 {
 }
 
@@ -106,6 +108,7 @@ duckdb::unique_ptr<duckdb::QueryResult> sirius_interface::sirius_execute_query(
       duckdb::make_uniq<op::sirius_physical_materialized_collector>(prepared, context);
     D_ASSERT(collector->result_column_types == prepared.prepared->types);
     engine.initialize(std::move(collector));
+    if (evidence) { (void)evidence->mark_backend_started(execution_backend::SIRIUS_GPU); }
     engine.execute();
     // Detach the materialized result before releasing the plan and executor.
     return engine.get_result();
