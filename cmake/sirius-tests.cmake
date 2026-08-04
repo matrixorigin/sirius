@@ -495,3 +495,19 @@ set_target_properties(
              CXX_STANDARD 20
              CXX_STANDARD_REQUIRED ON
              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test/io")
+
+add_executable(
+  sirius_execution_evidence_unittest
+  test/cpp/exec/execution_evidence_unittest.cpp
+  test/cpp/exec/test_execution_evidence.cpp
+  src/execution/sirius_execution_evidence.cpp)
+target_include_directories(
+  sirius_execution_evidence_unittest
+  PRIVATE ${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch
+          ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(sirius_execution_evidence_unittest Threads::Threads)
+set_target_properties(
+  sirius_execution_evidence_unittest
+  PROPERTIES CXX_STANDARD 20
+             CXX_STANDARD_REQUIRED ON
+             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test/cpp")
