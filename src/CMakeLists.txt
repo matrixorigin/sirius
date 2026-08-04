@@ -2,6 +2,7 @@ target_sources(
   sirius_objects
   PRIVATE c_api/error.cpp
           c_api/version.cpp
+          execution/sirius_execution_evidence.cpp
           config.cpp
           debug_utils.cpp
           pin_table.cpp

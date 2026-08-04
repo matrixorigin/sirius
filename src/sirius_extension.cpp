@@ -552,6 +552,7 @@ struct SiriusExecutionGlobalState : public GlobalTableFunctionState {
   unique_ptr<QueryResult> res;
   unique_ptr<Connection> conn;
   unique_ptr<::sirius::sirius_interface> sirius_iface;
+  std::shared_ptr<::sirius::execution_evidence> execution_evidence;
   bool finished = false;
   idx_t MaxThreads() const override { return 1; }
 };
@@ -561,6 +562,8 @@ unique_ptr<GlobalTableFunctionState> SiriusRegistration::GPUExecutionInitGlobal(
 {
   auto gstate  = make_uniq<SiriusExecutionGlobalState>();
   gstate->conn = make_uniq<Connection>(*context.db);
+  gstate->execution_evidence =
+    std::make_shared<::sirius::execution_evidence>(::sirius::execution_backend::SIRIUS_GPU);
   return std::move(gstate);
 }
 
@@ -621,8 +624,8 @@ void SiriusRegistration::GPUExecutionFunction(ClientContext& context,
         auto gpu_prepared = make_shared_ptr<::sirius::sirius_prepared_statement_data>(
           std::move(prepared), std::move(sirius_physical_plan));
 
-        gstate.sirius_iface =
-          make_uniq<::sirius::sirius_interface>(context, data.query_label, session_label);
+        gstate.sirius_iface = make_uniq<::sirius::sirius_interface>(
+          context, data.query_label, session_label, gstate.execution_evidence);
         gstate.res = gstate.sirius_iface->sirius_execute_query(
           context, data.query, std::move(gpu_prepared), window->query_id());
         if (gstate.res->HasError()) {
@@ -667,12 +670,17 @@ void SiriusRegistration::GPUExecutionFunction(ClientContext& context,
       // error on an S3 query keeps its stable typed message (no CPU fallback
       // exists for S3, so the S3 rewrite inside the fallback helper must not
       // replace it).
-      if (gpu_error.Type() == ExceptionType::INTERRUPT) { gpu_error.Throw(); }
+      if (gpu_error.Type() == ExceptionType::INTERRUPT) {
+        (void)gstate.execution_evidence->finish(::sirius::execution_outcome::CANCELLED);
+        gpu_error.Throw();
+      }
       if (runtime_unavailable_error &&
           sirius::references_sirius_owned_s3_parquet(data.cpu_fallback_query)) {
+        (void)gstate.execution_evidence->finish(::sirius::execution_outcome::FAILED);
         gpu_error.Throw();
       }
       if (!duckdb_fallback_enabled(context)) {
+        (void)gstate.execution_evidence->finish(::sirius::execution_outcome::FAILED);
         throw std::runtime_error("SiriusExecuteQuery error: " + gpu_error.RawMessage());
       }
       // Check the bound sources before entering CPU replay. The helper below
@@ -714,6 +722,8 @@ void SiriusRegistration::GPUExecutionFunction(ClientContext& context,
           sirius::transparent::late_failure_condition::policy_refused_in_replay;
         if (sirius_ctx) sirius_ctx->record_late_refusal(*failure_trace.refused_by);
       } else {
+        (void)gstate.execution_evidence->mark_backend_started(
+          ::sirius::execution_backend::DUCKDB_CPU);
         failure_trace.replay = true;
         if (sirius_ctx) {
           sirius_ctx->record_late_replay(failure.cause, read_only);
@@ -722,6 +732,10 @@ void SiriusRegistration::GPUExecutionFunction(ClientContext& context,
       }
       gstate.res = cpu_replay.take();
     }
+    auto outcome = gstate.res && !gstate.res->HasError()
+                     ? ::sirius::execution_outcome::SUCCEEDED
+                     : ::sirius::execution_outcome::FAILED;
+    (void)gstate.execution_evidence->finish(outcome);
     auto end      = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     SIRIUS_LOG_INFO("Execute query time: {:.2f} ms", duration.count() / 1000.0);
