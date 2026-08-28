@@ -26,8 +26,9 @@ class sirius_physical_gpu_mo_scan final : public sirius_physical_operator {
     if (exhausted.load(std::memory_order_acquire)) { return std::nullopt; }
     // This source permits exactly one blocking next_batch() task. Reporting
     // WAITING with itself as producer would make task selection recurse back
-    // into this same operator while that task is active. Publication schedules
-    // consumers, and the H2D acknowledgement schedules the next source task.
+    // into this same operator while that task is active. Publication releases
+    // the claim without self-scheduling; only downstream demand may reach this
+    // source again and admit the next task.
     if (task_active.load(std::memory_order_acquire)) { return std::nullopt; }
     return task_creation_hint{TaskCreationHint::READY, this};
   }

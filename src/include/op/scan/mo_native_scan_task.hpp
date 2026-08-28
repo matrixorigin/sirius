@@ -18,19 +18,16 @@
 
 namespace sirius::op::scan {
 
-class mo_native_scan_task_global_state final
-  : public pipeline::sirius_pipeline_task_global_state,
-    public std::enable_shared_from_this<mo_native_scan_task_global_state> {
+class mo_native_scan_task_global_state final : public pipeline::sirius_pipeline_task_global_state {
  public:
   mo_native_scan_task_global_state(duckdb::shared_ptr<pipeline::sirius_pipeline> pipeline,
                                    sirius_physical_gpu_mo_scan* scan_op,
-                                   duckdb::ClientContext& client_ctx,
                                    cucascade::memory::memory_space* host_memory_space);
 
   bool try_claim_task() noexcept;
   void finish_eof() noexcept;
   void acknowledge(std::uint64_t sequence) noexcept;
-  void schedule_next();
+  void release_after_publish() noexcept;
 
   [[nodiscard]] sirius_physical_gpu_mo_scan& get_operator() const { return *_scan_op; }
   [[nodiscard]] cucascade::memory::memory_space* get_host_memory_space() const
@@ -40,7 +37,6 @@ class mo_native_scan_task_global_state final
 
  private:
   sirius_physical_gpu_mo_scan* _scan_op;
-  duckdb::ClientContext& _client_ctx;
   cucascade::memory::memory_space* _host_memory_space;
 };
 

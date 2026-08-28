@@ -153,7 +153,6 @@ void task_creator::prepare_for_query(const sirius::planner::query& query)
         std::make_shared<op::scan::mo_native_scan_task_global_state>(
           pipeline,
           &source_operator->Cast<op::sirius_physical_gpu_mo_scan>(),
-          *_client_context,
           const_cast<cucascade::memory::memory_space*>(host_spaces[0])));
     } else {
       auto gs = std::make_shared<pipeline::gpu_pipeline_task_global_state>(pipeline);

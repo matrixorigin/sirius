@@ -5,11 +5,9 @@
 
 #include "op/scan/mo_native_scan_task.hpp"
 
-#include "creator/task_creator.hpp"
 #include "data/data_batch_utils.hpp"
 #include "log/logging.hpp"
 #include "op/sirius_physical_operator.hpp"
-#include "sirius_context.hpp"
 
 #include <cstring>
 #include <iterator>
@@ -107,11 +105,9 @@ std::string flatten_constant(const offload::mo_native_column_view& column, std::
 mo_native_scan_task_global_state::mo_native_scan_task_global_state(
   duckdb::shared_ptr<pipeline::sirius_pipeline> pipeline,
   sirius_physical_gpu_mo_scan* scan_op,
-  duckdb::ClientContext& client_ctx,
   cucascade::memory::memory_space* host_memory_space)
   : sirius_pipeline_task_global_state(std::move(pipeline)),
     _scan_op(scan_op),
-    _client_ctx(client_ctx),
     _host_memory_space(host_memory_space)
 {
   if (!_scan_op || !_host_memory_space) {
@@ -140,12 +136,9 @@ void mo_native_scan_task_global_state::acknowledge(std::uint64_t sequence) noexc
   SIRIUS_LOG_DEBUG("[mo_native_scan] acknowledged input sequence {}", sequence);
 }
 
-void mo_native_scan_task_global_state::schedule_next()
+void mo_native_scan_task_global_state::release_after_publish() noexcept
 {
   _scan_op->task_active.store(false, std::memory_order_release);
-  if (_scan_op->exhausted.load(std::memory_order_acquire)) { return; }
-  auto sirius_ctx = _client_ctx.registered_state->Get<duckdb::SiriusContext>("sirius_state");
-  if (sirius_ctx) { sirius_ctx->get_task_creator().schedule(_scan_op); }
 }
 
 mo_native_scan_task::mo_native_scan_task(
@@ -288,10 +281,7 @@ std::unique_ptr<operator_data> mo_native_scan_task::compute_task(rmm::cuda_strea
                                                                   bytes,
                                                                   nullptr,
                                                                   std::vector<std::size_t>{});
-  if (eof)
-    state.finish_eof();
-  else
-    state.schedule_next();
+  if (eof) { state.finish_eof(); }
   auto batch =
     std::make_shared<cucascade::data_batch>(get_next_batch_id(), std::move(representation));
   return std::make_unique<pipelineable_operator_data>(
@@ -305,6 +295,7 @@ void mo_native_scan_task::publish_output(operator_data& output_data,
   for (auto& batch : output.release_data_batches()) {
     _data_repo->add_data_batch(std::move(batch));
   }
+  _global_state->cast<mo_native_scan_task_global_state>().release_after_publish();
 }
 
 std::size_t mo_native_scan_task::get_estimated_reservation_size() const

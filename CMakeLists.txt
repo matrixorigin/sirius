@@ -428,6 +428,7 @@ set(TEST_SOURCES
     test/cpp/parallel/test_task_executor.cpp
     test/cpp/planner/test_distinct_hash_join_detection.cpp
     test/cpp/pipeline/test_gpu_pipeline_executor.cpp
+    test/cpp/pipeline/test_mo_native_scan_backpressure.cpp
     test/cpp/pipeline/test_oom_reschedule.cpp
     test/cpp/pipeline/test_pipeline_memory_history.cpp
     test/cpp/pipeline/test_gpu_pipeline_task_history.cpp
@@ -508,6 +509,7 @@ target_include_directories(
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/src/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/third_party>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/third_party/substrait>
+    $<BUILD_INTERFACE:${SIRIUS_TAE_SCANNER_DIR}/include>
     $<$<BOOL:${SIRIUS_LEGACY_INCLUDE_DIR}>:$<BUILD_INTERFACE:${SIRIUS_LEGACY_INCLUDE_DIR}>>
 )
 
