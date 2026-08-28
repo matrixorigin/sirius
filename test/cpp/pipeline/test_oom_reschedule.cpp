@@ -422,7 +422,7 @@ TEST_CASE("GPU pipeline executor reschedules tasks on OOM", "[gpu_pipeline_execu
 }
 
 // ---------------------------------------------------------------------------
-// Test: tasks that can never succeed exhaust their retry budget (MAX_OOM_RETRIES=10)
+// Test: tasks that can never succeed exhaust their bounded retry budget (MAX_RETRIES=100)
 // and cause the query to fail, while small tasks that fit in memory still complete.
 //
 // Memory layout:
@@ -431,7 +431,7 @@ TEST_CASE("GPU pipeline executor reschedules tasks on OOM", "[gpu_pipeline_execu
 //   xl_task       = 2048 MB allocation  → always OOMs (exceeds capacity)
 //
 // We dispatch 5 small tasks + 3 XL tasks = 8 total.
-// The XL tasks will be rescheduled up to 10 times each before the executor
+// The XL tasks will be rescheduled up to 100 times each before the executor
 // reports a max-retry error on the completion handler.
 // The 5 small tasks should all complete regardless.
 // After the error, drain_and_wait() should empty the task queue.
@@ -528,8 +528,8 @@ TEST_CASE("GPU pipeline executor fails after max OOM retries",
   // The completion handler should be in an error state from exceeding max retries.
   REQUIRE(f.completion.has_error());
 
-  // XL tasks should have OOM'd many times (at least 10 for the one that hit the limit).
-  REQUIRE(global_state->oom_count.load(std::memory_order_relaxed) >= 10);
+  // At least one XL task must exhaust the complete bounded retry budget.
+  REQUIRE(global_state->oom_count.load(std::memory_order_relaxed) >= 100);
 
   // After drain_and_wait(), the task queue should be empty.
   REQUIRE(f.executor->is_task_queue_empty());
