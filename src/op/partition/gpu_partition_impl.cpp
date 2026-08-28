@@ -21,8 +21,6 @@
 #include <cudf/partitioning.hpp>
 #include <cudf/unary.hpp>
 
-#include <cuda_runtime.h>
-
 namespace sirius {
 namespace op {
 
@@ -64,10 +62,6 @@ std::vector<std::shared_ptr<cucascade::data_batch>> gpu_partition_impl::hash_par
   }
   cudf::table_view effective_table(all_col_views);
   const int orig_num_cols = input_table.num_columns();
-
-  // cudf::hash_partition's CUB dispatch calls cudaPeekAtLastError(); a stale sticky
-  // error from an earlier call would be misattributed to the scan inside hash_partition.
-  (void)cudaGetLastError();
 
   auto partition_result = cudf::hash_partition(effective_table,
                                                effective_key_idx,

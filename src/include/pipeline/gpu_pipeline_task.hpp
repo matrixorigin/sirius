@@ -197,17 +197,17 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
   std::vector<op::sirius_physical_operator*> get_output_consumers() override;
 
   /**
-   * @brief Mark this task as replaced by a rescheduled task.
+   * @brief Mark this task as rescheduled due to OOM.
    *
    * When set, the destructor will NOT call mark_task_completed() on the pipeline,
    * since the rescheduled replacement task will handle that instead.
    */
-  void mark_as_rescheduled() noexcept { _rescheduled = true; }
+  void mark_as_rescheduled() noexcept { _oom_rescheduled = true; }
 
   /**
-   * @brief Check if this task was replaced by a rescheduled task.
+   * @brief Check if this task was rescheduled due to OOM.
    */
-  [[nodiscard]] bool is_rescheduled() const noexcept { return _rescheduled; }
+  [[nodiscard]] bool is_rescheduled() const noexcept { return _oom_rescheduled; }
 
   /**
    * @brief Get the data repositories for output publishing.
@@ -231,7 +231,7 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
   }
 
   /**
-   * @brief Create a task that resumes after a recoverable execution failure.
+   * @brief Create a rescheduled task after an OOM event.
    *
    * Derived classes can override this to ensure the rescheduled task has the correct
    * dynamic type and any additional state needed for re-execution.
@@ -246,7 +246,7 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
  private:
   uint64_t _task_id;
   std::vector<cucascade::shared_data_repository*> _data_repos;
-  bool _rescheduled                                                 = false;
+  bool _oom_rescheduled                                             = false;
   cucascade::memory::reservation_aware_resource_adaptor* _allocator = nullptr;
 };
 
