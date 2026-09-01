@@ -37,6 +37,7 @@
 // standard library
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -137,7 +138,11 @@ inline void emit(cudf::detail::metadata_builder& mb, metadata_node const& n)
 inline std::vector<uint8_t> pack_metadata_from_nodes(std::vector<metadata_node> const& nodes)
 {
   if (nodes.empty()) { return {}; }
+#if CUDF_VERSION_MAJOR > 26 || (CUDF_VERSION_MAJOR == 26 && CUDF_VERSION_MINOR >= 10)
+  cudf::detail::metadata_builder mb(static_cast<cudf::size_type>(nodes.size()), std::nullopt);
+#else
   cudf::detail::metadata_builder mb(static_cast<cudf::size_type>(nodes.size()));
+#endif
   for (auto const& n : nodes) {
     detail::emit(mb, n);
   }
