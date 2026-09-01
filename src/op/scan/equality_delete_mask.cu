@@ -15,11 +15,11 @@
  */
 
 #include <cudf/column/column_factories.hpp>
-#include <cudf/join/join.hpp>
 #include <cudf/types.hpp>
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/std/limits>
 #include <thrust/transform.h>
 
 #include <op/scan/iceberg_equality_delete_mask.hpp>
@@ -34,7 +34,9 @@ namespace {
 struct anti_join_to_bool {
   __host__ __device__ uint8_t operator()(cudf::size_type idx) const
   {
-    return idx == cudf::JoinNoMatch ? uint8_t{1} : uint8_t{0};
+    // cuDF's public JoinNoMatch contract is the minimum size_type value. Avoid
+    // pulling the host-only join AST into this CUDA translation unit.
+    return idx == cuda::std::numeric_limits<cudf::size_type>::min() ? uint8_t{1} : uint8_t{0};
   }
 };
 
