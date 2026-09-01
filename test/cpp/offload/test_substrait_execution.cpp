@@ -105,6 +105,24 @@ std::string make_stream_read(std::uint64_t feature_bits = 0,
   return plan;
 }
 
+::substrait::Expression_ScalarFunction* add_projected_scalar(::substrait::Plan& plan,
+                                                             const std::string& name)
+{
+  auto* declaration = plan.add_extensions()->mutable_extension_function();
+  declaration->set_function_anchor(1);
+  declaration->set_name(name);
+
+  auto* root    = plan.mutable_relations(0)->mutable_root();
+  auto input    = root->input();
+  auto* project = root->mutable_input()->mutable_project();
+  project->mutable_input()->CopyFrom(input);
+  project->mutable_common()->mutable_emit()->add_output_mapping(1);
+  auto* scalar = project->add_expressions()->mutable_scalar_function();
+  scalar->set_function_reference(1);
+  scalar->mutable_output_type()->mutable_i64();
+  return scalar;
+}
+
 class fake_resolution final : public resolved_tae_read {
  public:
   fake_resolution(::substrait::NamedStruct schema,
@@ -456,6 +474,92 @@ TEST_CASE("the complete TPC-H join subset is admitted", "[substrait_contract]")
       plan.SerializeAsString(), resolver, 1000);
     REQUIRE(resolver.calls == 2);
     REQUIRE(validated.resolutions.size() == 2);
+  }
+}
+
+TEST_CASE("Substrait extract admits exactly one enum and one value argument",
+          "[substrait_contract]")
+{
+  SECTION("supported date part")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->set_enum_("year");
+    extract->add_arguments()->mutable_value()->mutable_literal()->set_date(0);
+
+    const auto validated = sirius::offload::detail::validate_and_resolve_substrait(
+      plan.SerializeAsString(), resolver, 1000);
+    REQUIRE(resolver.calls == 1);
+    REQUIRE(validated.resolutions.size() == 1);
+
+    ::substrait::Plan rewritten;
+    REQUIRE(rewritten.ParseFromString(validated.serialized));
+    const auto& function =
+      rewritten.relations(0).root().input().project().expressions(0).scalar_function();
+    REQUIRE(function.arguments_size() == 2);
+    REQUIRE(function.arguments(0).enum_() == "year");
+    REQUIRE(function.arguments(1).has_value());
+  }
+
+  SECTION("unknown date part")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->set_enum_("epoch");
+    extract->add_arguments()->mutable_value()->mutable_literal()->set_date(0);
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
+  }
+
+  SECTION("wrong argument order")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->mutable_value()->mutable_literal()->set_date(0);
+    extract->add_arguments()->set_enum_("year");
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
+  }
+
+  SECTION("missing value argument")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->set_enum_("year");
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
+  }
+
+  SECTION("extra value argument")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->set_enum_("year");
+    extract->add_arguments()->mutable_value()->mutable_literal()->set_date(0);
+    extract->add_arguments()->mutable_value()->mutable_literal()->set_date(1);
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
+  }
+
+  SECTION("enum on another scalar function")
+  {
+    fake_resolver resolver;
+    auto plan      = make_read_plan(make_tae_read());
+    auto* subtract = add_projected_scalar(plan, "subtract");
+    subtract->add_arguments()->set_enum_("year");
+    subtract->add_arguments()->mutable_value()->mutable_literal()->set_i64(1);
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
+  }
+
+  SECTION("type argument")
+  {
+    fake_resolver resolver;
+    auto plan     = make_read_plan(make_tae_read());
+    auto* extract = add_projected_scalar(plan, "extract");
+    extract->add_arguments()->set_enum_("year");
+    extract->add_arguments()->mutable_type()->mutable_date();
+    require_error(plan.SerializeAsString(), resolver, substrait_error_code::UNSUPPORTED_PLAN, true);
   }
 }
 

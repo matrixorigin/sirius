@@ -423,7 +423,8 @@ class plan_validator {
           "add",  "subtract",    "multiply",  "divide",  "modulus",     "between",
           "like", "starts_with", "substring", "extract"};
         const auto& function = expression.scalar_function();
-        if (allowed.count(function_name(function.function_reference())) == 0) {
+        const auto& name     = function_name(function.function_reference());
+        if (allowed.count(name) == 0) {
           unsupported("aggregate function used as a scalar expression");
         }
         if (function.args_size() != 0 || function.options_size() != 0 ||
@@ -432,41 +433,32 @@ class plan_validator {
             "deprecated arguments, options, or missing scalar output types are unsupported");
         }
         validate_type(function.output_type());
-        std::size_t value_arguments = 0;
-        std::size_t enum_arguments  = 0;
-        for (const auto& argument : function.arguments()) {
-          if (argument.has_value()) {
-            ++value_arguments;
-            validate_expression(argument.value());
-          } else if (argument.has_enum_() &&
-                     function_name(function.function_reference()) == "extract") {
-            static const std::unordered_set<std::string> extract_fields = {"year",
-                                                                           "month",
-                                                                           "day",
-                                                                           "decade",
-                                                                           "century",
-                                                                           "millenium",
-                                                                           "quarter",
-                                                                           "microsecond",
-                                                                           "milliseconds",
-                                                                           "second",
-                                                                           "minute",
-                                                                           "hour"};
-            auto field                                                  = argument.enum_();
-            std::transform(field.begin(), field.end(), field.begin(), [](unsigned char value) {
-              return static_cast<char>(std::tolower(value));
-            });
-            if (extract_fields.count(field) == 0) {
-              unsupported("unsupported extract enum argument");
-            }
-            ++enum_arguments;
-          } else {
-            unsupported("only value arguments and extract enum arguments are supported");
+        if (name == "extract") {
+          // Keep this exact allowlist aligned with the pinned Substrait importer's
+          // valid_extract_subfields. "millenium" is its compatibility spelling.
+          static const std::unordered_set<std::string> units = {"year",
+                                                                "month",
+                                                                "day",
+                                                                "decade",
+                                                                "century",
+                                                                "millenium",
+                                                                "quarter",
+                                                                "microsecond",
+                                                                "milliseconds",
+                                                                "second",
+                                                                "minute",
+                                                                "hour"};
+          if (function.arguments_size() != 2 || !function.arguments(0).has_enum_() ||
+              units.count(function.arguments(0).enum_()) == 0 ||
+              !function.arguments(1).has_value()) {
+            unsupported("extract requires one supported enum and one value argument");
           }
+          validate_expression(function.arguments(1).value());
+          break;
         }
-        if (function_name(function.function_reference()) == "extract" &&
-            (value_arguments != 1 || enum_arguments != 1)) {
-          unsupported("extract requires one enum field and one value argument");
+        for (const auto& argument : function.arguments()) {
+          if (!argument.has_value()) { unsupported("only value function arguments are supported"); }
+          validate_expression(argument.value());
         }
         break;
       }
