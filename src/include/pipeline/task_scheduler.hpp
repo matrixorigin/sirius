@@ -189,6 +189,10 @@ class task_scheduler {
    */
   void drain_after_error();
 
+  /// Stop task creation, discard queued work, and wait for in-flight scan/GPU
+  /// tasks before normal QueryEnd destroys query-owned plans and repositories.
+  void drain_after_query();
+
  private:
   void management_eventloop();
 

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#define CUB_WRAPPED_NAMESPACE sirius_tae_cub
 #include <cub/cub.cuh>
 #include <cuda/tae/tae_decode_kernels.hpp>
 #include <cuda_runtime.h>
@@ -91,36 +92,6 @@ __global__ void scatter_chars_kernel(const uint8_t* __restrict__ varlena_base,
   }
 }
 
-// ---------------------------------------------------------------------------
-// Batched varchar kernels — 2D grid: blockIdx.y = desc, blockIdx.x = row tile
-// ---------------------------------------------------------------------------
-
-// Batched compute lengths: each Y-slice handles one block descriptor.
-__global__ void batched_compute_lengths_kernel(const BatchedVarcharDesc* __restrict__ descs,
-                                               int32_t* __restrict__ offsets)
-{
-  auto const& desc = descs[blockIdx.y];
-  VarlenaReader reader{desc.varlena_base, desc.area_base};
-  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < desc.n_rows;
-       i += gridDim.x * blockDim.x) {
-    offsets[desc.row_offset + i] = static_cast<int32_t>(reader.get_length(i));
-  }
-}
-
-// Batched scatter chars: each Y-slice handles one block descriptor.
-__global__ void batched_scatter_chars_kernel(const BatchedVarcharDesc* __restrict__ descs,
-                                             const int32_t* __restrict__ offsets,
-                                             uint8_t* __restrict__ chars)
-{
-  auto const& desc = descs[blockIdx.y];
-  VarlenaReader reader{desc.varlena_base, desc.area_base};
-  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < desc.n_rows;
-       i += gridDim.x * blockDim.x) {
-    int32_t dst_off = offsets[desc.row_offset + i];
-    reader.copy_data(i, chars + dst_off);
-  }
-}
-
 }  // anonymous namespace
 
 void decode_varchar_offsets(const uint8_t* d_varlena_base,
@@ -137,14 +108,15 @@ void decode_varchar_offsets(const uint8_t* d_varlena_base,
   }
 
   // Temp-size query: always use nullptr to avoid running scan on uninitialized data
-  cub::DeviceScan::ExclusiveSum(
+  CUB_NS_QUALIFIER::DeviceScan::ExclusiveSum(
     nullptr, temp_bytes, d_offsets, d_offsets, n_rows + 1, stream.value());
   if (!d_temp_storage) return;
 
   uint32_t blocks = (n_rows + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
   compute_lengths_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
     d_varlena_base, d_area_base, d_offsets, n_rows);
-  cub::DeviceScan::ExclusiveSum(
+  cudaMemsetAsync(d_offsets + n_rows, 0, sizeof(int32_t), stream.value());
+  CUB_NS_QUALIFIER::DeviceScan::ExclusiveSum(
     d_temp_storage, temp_bytes, d_offsets, d_offsets, n_rows + 1, stream.value());
 }
 
@@ -189,52 +161,6 @@ void adjust_offsets(int32_t* d_offsets, int32_t base, uint32_t count, rmm::cuda_
   if (count == 0 || base == 0) return;
   uint32_t blocks = (count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
   adjust_offsets_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(d_offsets, base, count);
-}
-
-void batched_decode_varchar_offsets(const BatchedVarcharDesc* d_descs,
-                                    uint32_t n_descs,
-                                    int32_t* d_offsets,
-                                    void* d_temp_storage,
-                                    std::size_t& temp_bytes,
-                                    uint32_t total_rows,
-                                    uint32_t max_block_rows,
-                                    rmm::cuda_stream_view stream)
-{
-  if (total_rows == 0) {
-    if (d_offsets) { cudaMemsetAsync(d_offsets, 0, sizeof(int32_t), stream.value()); }
-    return;
-  }
-
-  // CUB temp-size query (always use nullptr to avoid running scan on uninitialized data)
-  cub::DeviceScan::ExclusiveSum(
-    nullptr, temp_bytes, d_offsets, d_offsets, total_rows + 1, stream.value());
-  if (!d_temp_storage) return;
-
-  // Step 1: Compute per-row string lengths for all blocks in one kernel
-  if (n_descs > 0 && max_block_rows > 0) {
-    uint32_t grid_x = (max_block_rows + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    dim3 grid(grid_x, n_descs);
-    batched_compute_lengths_kernel<<<grid, THREADS_PER_BLOCK, 0, stream.value()>>>(d_descs,
-                                                                                   d_offsets);
-  }
-
-  // Step 2: Single CUB ExclusiveSum over ALL rows → globally monotonic offsets
-  cub::DeviceScan::ExclusiveSum(
-    d_temp_storage, temp_bytes, d_offsets, d_offsets, total_rows + 1, stream.value());
-}
-
-void batched_decode_varchar_scatter(const BatchedVarcharDesc* d_descs,
-                                    uint32_t n_descs,
-                                    const int32_t* d_offsets,
-                                    uint8_t* d_chars,
-                                    uint32_t max_block_rows,
-                                    rmm::cuda_stream_view stream)
-{
-  if (n_descs == 0 || max_block_rows == 0) return;
-  uint32_t grid_x = (max_block_rows + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-  dim3 grid(grid_x, n_descs);
-  batched_scatter_chars_kernel<<<grid, THREADS_PER_BLOCK, 0, stream.value()>>>(
-    d_descs, d_offsets, d_chars);
 }
 
 }  // namespace sirius::cuda::tae

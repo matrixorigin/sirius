@@ -31,7 +31,10 @@ shared_test_env::shared_test_env(const std::filesystem::path& config_path)
     original_config_env_     = current;
   }
 
-  create_db();
+  // Environments start paused and are initialized lazily by the listener when a matching
+  // [shared_context] or [integration] test begins. Eager initialization here allocates both GPU
+  // pools even when running an isolated test filter.
+  setenv("SIRIUS_DISABLE", "1", 1);
 }
 
 shared_test_env::~shared_test_env()

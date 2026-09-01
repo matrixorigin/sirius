@@ -246,6 +246,7 @@ void task_creator::start_thread_pool()
   if (!_running.compare_exchange_strong(expected, true)) { return; }
   _bounded_pool = std::make_unique<exec::bounded_thread_pool>(
     _config.num_threads, _config.thread_name_prefix, _config.cpu_affinity_list);
+  _task_creation_queue.reactivate();
   _manager_thread = std::thread(&task_creator::manager_loop, this);
 }
 

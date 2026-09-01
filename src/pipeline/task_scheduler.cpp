@@ -204,6 +204,12 @@ void task_scheduler::terminate_query(std::exception_ptr error)
 void task_scheduler::drain_after_error()
 {
   SIRIUS_LOG_INFO("task_scheduler: draining after error");
+  drain_after_query();
+  SIRIUS_LOG_INFO("task_scheduler: DONE draining after error");
+}
+
+void task_scheduler::drain_after_query()
+{
   // Drain the task creator first so no thread is inside get_next_task_input_data()/
   // pop_data_batch() when QueryEnd() clears repositories (avoids use-after-free).
   if (_task_creator) { _task_creator->stop_thread_pool(); }
@@ -224,7 +230,6 @@ void task_scheduler::drain_after_error()
     gpu_exec->drain_and_wait();
   }
   if (_task_creator) { _task_creator->start_thread_pool(); }
-  SIRIUS_LOG_INFO("task_scheduler: DONE draining after error");
 }
 
 void task_scheduler::management_eventloop()

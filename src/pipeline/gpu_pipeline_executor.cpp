@@ -210,6 +210,8 @@ void gpu_pipeline_executor::manager_loop()
        exc_stream = std::move(exc_stream),
        consumers  = std::move(output_consumers),
        pipeline]() mutable {
+        std::unique_lock<std::mutex> pipeline_execution_guard;
+        if (pipeline) { pipeline_execution_guard = pipeline->acquire_execution_lock(); }
         try {
           task->execute(exc_stream);
         } catch (oom_reschedule_exception& oom) {
@@ -327,8 +329,10 @@ void gpu_pipeline_executor::manager_loop()
 
         if (!query_complete && _task_creator) {
           bool pipeline_done = pipeline && pipeline->is_pipeline_finished();
-          for (auto* consumer : consumers) {
-            if (consumer) { _task_creator->schedule(consumer); }
+          if (!pipeline_done) {
+            for (auto* consumer : consumers) {
+              if (consumer) { _task_creator->schedule(consumer); }
+            }
           }
         }
 

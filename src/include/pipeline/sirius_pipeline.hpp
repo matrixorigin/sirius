@@ -28,6 +28,9 @@
 #include "duckdb/parallel/pipeline.hpp"
 
 #include <nvtx3/nvtx3.hpp>
+
+#include <mutex>
+
 namespace sirius {
 
 class sirius_engine;
@@ -167,6 +170,14 @@ class sirius_pipeline : public duckdb::enable_shared_from_this<sirius_pipeline> 
   //! Set the task_creator pointer so this pipeline can schedule downstream consumers on finish.
   void set_task_creator(sirius::creator::task_creator* tc);
 
+  /// Serialize the complete lifetime of tasks belonging to this pipeline. Operators and their
+  /// input batches are not generally safe for concurrent prepare/execute/publish cycles, while
+  /// tasks from independent pipelines may still execute on different GPU streams.
+  [[nodiscard]] std::unique_lock<std::mutex> acquire_execution_lock() const
+  {
+    return std::unique_lock<std::mutex>(_execution_mutex);
+  }
+
  private:
   //! Whether or not the pipeline has been readied
   bool ready;
@@ -211,6 +222,8 @@ class sirius_pipeline : public duckdb::enable_shared_from_this<sirius_pipeline> 
 
   std::atomic<std::size_t> tasks_created   = 0;
   std::atomic<std::size_t> tasks_completed = 0;
+
+  mutable std::mutex _execution_mutex;
 
   //! NVTX process-wide range tracking the pipeline's active lifetime
   std::atomic<bool> _nvtx_range_started{false};

@@ -158,14 +158,6 @@ struct BatchedFixedDesc {
   uint32_t row_offset;  ///< Cumulative row offset in the output column.
 };
 
-/// Block descriptor for batched varchar decode.
-struct BatchedVarcharDesc {
-  const uint8_t* varlena_base;  ///< Device pointer to varlena struct array.
-  const uint8_t* area_base;     ///< Device pointer to area section (big strings).
-  uint32_t n_rows;              ///< Number of rows in this block.
-  uint32_t row_offset;          ///< Cumulative row offset in the output offsets/chars.
-};
-
 /// Block descriptor for batched null mask inversion.
 struct BatchedNullMaskDesc {
   const uint8_t* src;            ///< Device pointer to MO null bitmap.
@@ -194,53 +186,6 @@ void batched_decode_fixed_width(const BatchedFixedDesc* d_descs,
                                 int64_t epoch_adjust,
                                 uint32_t max_block_rows,
                                 rmm::cuda_stream_view stream);
-
-/**
- * @brief Batched varchar offsets computation across all blocks of a column.
- *
- * Phase 1: launches a single kernel to compute per-row string lengths for
- * all blocks, then runs a single CUB ExclusiveSum over the entire offsets
- * array to produce globally monotonic offsets (no adjust_offsets needed).
- *
- * Call with d_temp_storage=nullptr first to query CUB temp size.
- *
- * @param d_descs         Device array of BatchedVarcharDesc
- * @param n_descs         Number of descriptors (blocks)
- * @param d_offsets       Output: int32[total_rows+1] global offsets array
- * @param d_temp_storage  CUB temporary storage (nullptr for size query)
- * @param temp_bytes      [in/out] Size of temp storage
- * @param total_rows      Sum of all desc.n_rows
- * @param max_block_rows  Maximum n_rows across all descriptors
- * @param stream          CUDA stream
- */
-void batched_decode_varchar_offsets(const BatchedVarcharDesc* d_descs,
-                                    uint32_t n_descs,
-                                    int32_t* d_offsets,
-                                    void* d_temp_storage,
-                                    std::size_t& temp_bytes,
-                                    uint32_t total_rows,
-                                    uint32_t max_block_rows,
-                                    rmm::cuda_stream_view stream);
-
-/**
- * @brief Batched varchar scatter across all blocks of a column.
- *
- * Phase 2: uses precomputed global offsets to scatter string data from all
- * blocks into a single contiguous chars buffer.
- *
- * @param d_descs         Device array of BatchedVarcharDesc
- * @param n_descs         Number of descriptors (blocks)
- * @param d_offsets       Precomputed global offsets from batched_decode_varchar_offsets
- * @param d_chars         Output: character data buffer
- * @param max_block_rows  Maximum n_rows across all descriptors
- * @param stream          CUDA stream
- */
-void batched_decode_varchar_scatter(const BatchedVarcharDesc* d_descs,
-                                    uint32_t n_descs,
-                                    const int32_t* d_offsets,
-                                    uint8_t* d_chars,
-                                    uint32_t max_block_rows,
-                                    rmm::cuda_stream_view stream);
 
 /**
  * @brief Batched null mask inversion across multiple blocks.

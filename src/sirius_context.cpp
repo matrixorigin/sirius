@@ -149,8 +149,28 @@ void SiriusContext::QueryEnd()
 
   try {
     spdlog::info("QueryEnd");
+    // Completion means the result pipeline is done, but upstream work can
+    // still be queued after LIMIT/TOP-N. Drain it before destroying the plan
+    // or clearing repositories used by those tasks.
+    bool const had_sirius_query = query_ != nullptr;
+    if (had_sirius_query) { task_scheduler_->drain_after_query(); }
     captured_logical_plan_.reset();
     query_.reset();
+
+    // query_.reset() destroys persistent cuDF/cuco operator state. Some of
+    // that teardown is asynchronous, so finish it before a later query can
+    // reuse the device pool or inherit a latent CUDA error.
+    if (had_sirius_query) {
+      for (auto* space :
+           memory_manager_->get_memory_spaces_for_tier(cucascade::memory::Tier::GPU)) {
+        rmm::cuda_set_device_raii set_device(rmm::cuda_device_id{space->get_device_id()});
+        auto const status = cudaDeviceSynchronize();
+        if (status != cudaSuccess) {
+          throw std::runtime_error(std::string("QueryEnd CUDA synchronization failed: ") +
+                                   cudaGetErrorString(status));
+        }
+      }
+    }
 
     // Drain all downgrade executors before clearing repositories — ensures no downgrade
     // tasks hold shared_ptr<data_batch> references to batches we're about to destroy.
@@ -169,6 +189,18 @@ void SiriusContext::QueryEnd()
           info.operator_id,
           info.port_id,
           info.count);
+      }
+    }
+
+    if (had_sirius_query) {
+      for (auto* space :
+           memory_manager_->get_memory_spaces_for_tier(cucascade::memory::Tier::GPU)) {
+        rmm::cuda_set_device_raii set_device(rmm::cuda_device_id{space->get_device_id()});
+        auto const status = cudaDeviceSynchronize();
+        if (status != cudaSuccess) {
+          throw std::runtime_error(std::string("QueryEnd CUDA synchronization failed: ") +
+                                   cudaGetErrorString(status));
+        }
       }
     }
   } catch (...) {
