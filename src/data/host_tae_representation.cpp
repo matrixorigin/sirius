@@ -28,13 +28,15 @@ host_tae_representation::host_tae_representation(
   std::size_t compressed_bytes,
   std::size_t uncompressed_bytes,
   std::shared_ptr<translated_expression> filter_expression,
-  std::vector<std::size_t> post_filter_projection_ids)
+  std::vector<std::size_t> post_filter_projection_ids,
+  std::unique_ptr<host_tae_input_lease> input_lease)
   : idata_representation([&]() -> cucascade::memory::memory_space& {
       if (!memory_space) {
         throw std::runtime_error("[host_tae_representation] null memory_space pointer");
       }
       return *memory_space;
     }()),
+    _input_lease(std::move(input_lease)),
     _host_data(std::make_shared<pinned_host_buffer>(std::move(host_data))),
     _chunks(std::move(chunks)),
     _total_rows(total_rows),
@@ -45,9 +47,24 @@ host_tae_representation::host_tae_representation(
 {
 }
 
+host_tae_representation::host_tae_representation(const host_tae_representation& other)
+  : idata_representation(const_cast<cucascade::memory::memory_space&>(other.get_memory_space())),
+    _host_data(other._host_data),
+    _chunks(other._chunks),
+    _total_rows(other._total_rows),
+    _compressed_bytes(other._compressed_bytes),
+    _uncompressed_bytes(other._uncompressed_bytes),
+    _filter_expression(other._filter_expression),
+    _post_filter_projection_ids(other._post_filter_projection_ids)
+{
+}
+
 std::unique_ptr<cucascade::idata_representation> host_tae_representation::clone(
   rmm::cuda_stream_view /*stream*/)
 {
+  if (_input_lease) {
+    throw std::runtime_error("one-pass MO native input representation cannot be cloned");
+  }
   // Shallow clone: shares host data buffer
   auto result = std::unique_ptr<host_tae_representation>(new host_tae_representation(*this));
   return result;

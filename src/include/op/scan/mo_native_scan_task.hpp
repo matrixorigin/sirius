@@ -27,7 +27,7 @@ class mo_native_scan_task_global_state final : public pipeline::sirius_pipeline_
   bool try_claim_task() noexcept;
   void finish_eof() noexcept;
   void acknowledge(std::uint64_t sequence) noexcept;
-  void release_after_publish() noexcept;
+  void release_after_h2d() noexcept;
 
   [[nodiscard]] sirius_physical_gpu_mo_scan& get_operator() const { return *_scan_op; }
   [[nodiscard]] cucascade::memory::memory_space* get_host_memory_space() const

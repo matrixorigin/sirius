@@ -247,11 +247,11 @@ void require_error(const std::string& plan,
 
 }  // namespace
 
-TEST_CASE("MO native scan reserves its expanded staging bound", "[substrait_contract]")
+TEST_CASE("MO native scan reserves one maximally expanded frame", "[substrait_contract]")
 {
   REQUIRE(sirius::offload::mo_native_scan_reservation_bytes() ==
-          sirius::offload::max_staged_native_batch_bytes);
-  REQUIRE(sirius::offload::max_staged_native_batch_bytes == 96U * 1024U * 1024U);
+          sirius::offload::max_expanded_native_batch_bytes);
+  REQUIRE(sirius::offload::max_expanded_native_batch_bytes == 64U * 1024U * 1024U);
 }
 
 TEST_CASE("Substrait TaeRead is authenticated and rewritten without execution",

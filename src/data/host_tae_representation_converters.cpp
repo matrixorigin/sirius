@@ -163,8 +163,10 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
 
   if (chunks.empty()) {
     auto empty_table = std::make_unique<cudf::table>();
-    return std::make_unique<cucascade::gpu_table_representation>(
+    auto result      = std::make_unique<cucascade::gpu_table_representation>(
       std::move(empty_table), *const_cast<cucascade::memory::memory_space*>(target_memory_space));
+    host_src.mark_h2d_complete();
+    return result;
   }
 
 #ifdef SIRIUS_PROFILE
@@ -765,8 +767,10 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
                    table->num_columns(),
                    table->num_rows());
 
-  return std::make_unique<cucascade::gpu_table_representation>(
+  auto result = std::make_unique<cucascade::gpu_table_representation>(
     std::move(table), *const_cast<cucascade::memory::memory_space*>(target_memory_space));
+  host_src.mark_h2d_complete();
+  return result;
 }
 
 }  // namespace detail

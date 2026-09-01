@@ -39,6 +39,15 @@
 
 namespace sirius {
 
+// Optional one-pass ownership carried only by streamed MO input. The
+// representation marks it after a successful synchronized H2D conversion; its
+// destructor then releases the source generation and retained host reservation.
+class host_tae_input_lease {
+ public:
+  virtual ~host_tae_input_lease()           = default;
+  virtual void mark_h2d_complete() noexcept = 0;
+};
+
 /**
  * @brief RAII wrapper for host memory that uses CUDA pinned (page-locked)
  * allocation above a size threshold, falling back to regular heap allocation
@@ -169,7 +178,8 @@ class host_tae_representation : public cucascade::idata_representation {
                           std::size_t compressed_bytes,
                           std::size_t uncompressed_bytes,
                           std::shared_ptr<translated_expression> filter_expression = nullptr,
-                          std::vector<std::size_t> post_filter_projection_ids      = {});
+                          std::vector<std::size_t> post_filter_projection_ids      = {},
+                          std::unique_ptr<host_tae_input_lease> input_lease        = nullptr);
 
   // idata_representation interface
   std::unique_ptr<idata_representation> clone(rmm::cuda_stream_view stream) override;
@@ -180,6 +190,10 @@ class host_tae_representation : public cucascade::idata_representation {
   [[nodiscard]] auto const& get_host_data() const { return _host_data; }
   [[nodiscard]] auto const& get_column_chunks() const { return _chunks; }
   [[nodiscard]] std::size_t get_total_rows() const { return _total_rows; }
+  void mark_h2d_complete() noexcept
+  {
+    if (_input_lease) { _input_lease->mark_h2d_complete(); }
+  }
 
   [[nodiscard]] std::shared_ptr<translated_expression> const& get_filter_expression() const
   {
@@ -192,6 +206,12 @@ class host_tae_representation : public cucascade::idata_representation {
   }
 
  private:
+  host_tae_representation(const host_tae_representation& other);
+
+  // Declared before the raw representation fields so it is destroyed last.
+  // This guarantees the old host bytes are gone before the source generation
+  // is released and the prefetched frame can be pulled.
+  std::unique_ptr<host_tae_input_lease> _input_lease;
   std::shared_ptr<pinned_host_buffer> _host_data;
 
   std::vector<column_chunk_info> _chunks;
