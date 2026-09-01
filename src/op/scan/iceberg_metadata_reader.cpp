@@ -14,12 +14,6 @@
  * limitations under the License.
  */
 
-// cuDF 26.10 nightly uses std::variant in cudf/ast/expressions.hpp without
-// including the standard header itself. Keep this dependency before cuDF.
-#if __has_include(<variant>)
-#include <variant>
-#endif
-
 #include <cudf/concatenate.hpp>
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/parquet.hpp>

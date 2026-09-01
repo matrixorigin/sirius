@@ -478,7 +478,8 @@ target_include_directories(
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/src/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/third_party>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/substrait/third_party/substrait>
-    $<BUILD_INTERFACE:${SIRIUS_TAE_SCANNER_DIR}/include>)
+    $<BUILD_INTERFACE:${SIRIUS_TAE_SCANNER_DIR}/include>
+)
 target_link_libraries(sirius_substrait_contract_unittest sirius_extension
                       duckdb_static)
 link_extension_libraries(sirius_substrait_contract_unittest "")

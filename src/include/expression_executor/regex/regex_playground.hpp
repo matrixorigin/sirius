@@ -16,12 +16,6 @@
 
 #pragma once
 
-// cuDF 26.10 nightly uses std::variant in cudf/ast/expressions.hpp without
-// including the standard header itself. Keep this dependency before cuDF.
-#if __has_include(<variant>)
-#include <variant>
-#endif
-
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/transform.hpp>
