@@ -207,7 +207,9 @@ void mo_native_scan_task_global_state::acknowledge(std::uint64_t sequence) noexc
 }
 
 void mo_native_scan_task_global_state::release_after_h2d() noexcept
-{ _scan_op->task_active.store(false, std::memory_order_release); }
+{
+  _scan_op->task_active.store(false, std::memory_order_release);
+}
 
 mo_native_scan_task::mo_native_scan_task(
   std::uint64_t task_id,
@@ -309,9 +311,9 @@ std::unique_ptr<operator_data> mo_native_scan_task::compute_task(rmm::cuda_strea
     chunk.width              = item.column->type.width;
     chunk.scale              = item.column->type.scale;
     chunk.extent             = tae::Extent{0,
-                                           0,
-                                           static_cast<std::uint32_t>(item.encoded_size),
-                                           static_cast<std::uint32_t>(item.encoded_size)};
+                               0,
+                               static_cast<std::uint32_t>(item.encoded_size),
+                               static_cast<std::uint32_t>(item.encoded_size)};
     chunk.null_cnt           = item.null_count;
     chunk.row_count          = static_cast<std::uint32_t>(input->rows());
     chunk.pinned_offset      = offset;

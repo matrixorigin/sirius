@@ -41,7 +41,9 @@ std::unique_ptr<cucascade::memory::memory_space> make_host_space()
 
 template <typename T>
 void append_scalar(std::string& output, T value)
-{ output.append(reinterpret_cast<const char*>(&value), sizeof(value)); }
+{
+  output.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
 
 class fixture_native_batch final : public sirius::offload::mo_native_batch {
  public:
@@ -87,7 +89,9 @@ class fixture_native_batch final : public sirius::offload::mo_native_batch {
   std::uint64_t rows() const noexcept override { return rows_; }
   std::uint64_t payload_bytes() const noexcept override { return encoded_.size(); }
   const std::vector<sirius::offload::mo_native_column_view>& columns() const noexcept override
-  { return columns_; }
+  {
+    return columns_;
+  }
 
  private:
   std::uint64_t sequence_;

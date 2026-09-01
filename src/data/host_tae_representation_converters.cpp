@@ -434,13 +434,8 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
         auto& block          = blocks[i];
         auto* block_offsets  = static_cast<int32_t*>(offsets_buf.data()) + row_offset;
         std::size_t temp_len = max_temp_bytes;
-        cuda::tae::decode_varchar_offsets(block.d_data,
-                                          block.d_area,
-                                          block_offsets,
-                                          d_temp.data(),
-                                          temp_len,
-                                          block.rows,
-                                          stream);
+        cuda::tae::decode_varchar_offsets(
+          block.d_data, block.d_area, block_offsets, d_temp.data(), temp_len, block.rows, stream);
         CUDF_CUDA_TRY(cudaMemcpyAsync(&block_char_counts[i],
                                       block_offsets + block.rows,
                                       sizeof(int32_t),

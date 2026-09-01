@@ -19,11 +19,24 @@
 #include "op/scan/cached_ranges.hpp"
 
 #include <cudf/io/datasource.hpp>
+#include <cudf/version_config.hpp>
+
+#if CUDF_VERSION_MAJOR > 26 || (CUDF_VERSION_MAJOR == 26 && CUDF_VERSION_MINOR >= 10)
+#include <cuda/stream>
+#else
+#include <rmm/cuda_stream_view.hpp>
+#endif
 
 #include <future>
 #include <memory>
 
 namespace sirius::op::scan {
+
+#if CUDF_VERSION_MAJOR > 26 || (CUDF_VERSION_MAJOR == 26 && CUDF_VERSION_MINOR >= 10)
+using datasource_stream_ref = cuda::stream_ref;
+#else
+using datasource_stream_ref = rmm::cuda_stream_view;
+#endif
 
 class prefetched_data_source : public cudf::io::datasource {
  public:
@@ -47,17 +60,17 @@ class prefetched_data_source : public cudf::io::datasource {
   [[nodiscard]] bool is_device_read_preferred(size_t size) const override { return true; }
 
   [[nodiscard]] std::unique_ptr<cudf::io::datasource::buffer> device_read(
-    size_t offset, size_t size, rmm::cuda_stream_view stream) override;
+    size_t offset, size_t size, datasource_stream_ref stream) override;
 
   size_t device_read(size_t offset,
                      size_t size,
                      uint8_t* dst,
-                     rmm::cuda_stream_view stream) override;
+                     datasource_stream_ref stream) override;
 
   std::future<size_t> device_read_async(size_t offset,
                                         size_t size,
                                         uint8_t* dst,
-                                        rmm::cuda_stream_view stream) override;
+                                        datasource_stream_ref stream) override;
 
   [[nodiscard]] size_t size() const override;
 
@@ -70,7 +83,7 @@ class prefetched_data_source : public cudf::io::datasource {
   copy_result enqueue_device_copies(size_t offset,
                                     size_t size,
                                     uint8_t* dst,
-                                    rmm::cuda_stream_view stream);
+                                    datasource_stream_ref stream);
 
   std::unique_ptr<cache_ranges> ranges_;
   std::size_t file_size_;
