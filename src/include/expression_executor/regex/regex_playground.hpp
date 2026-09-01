@@ -22,6 +22,8 @@
 
 #include <rmm/cuda_stream_view.hpp>
 
+#include <variant>
+
 namespace sirius {
 namespace regex {
 
