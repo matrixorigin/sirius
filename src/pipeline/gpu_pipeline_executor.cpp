@@ -229,9 +229,7 @@ void gpu_pipeline_executor::manager_loop()
        consumers  = std::move(output_consumers),
        pipeline]() mutable {
         std::unique_lock<std::mutex> pipeline_execution_guard;
-        if (pipeline && !pipeline->permits_concurrent_tasks()) {
-          pipeline_execution_guard = pipeline->acquire_execution_lock();
-        }
+        if (pipeline) { pipeline_execution_guard = pipeline->acquire_execution_lock(); }
         try {
           task->execute(exc_stream);
         } catch (const gpu_stream_quiescence_error& fatal) {

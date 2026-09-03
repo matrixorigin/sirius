@@ -178,14 +178,6 @@ class sirius_pipeline : public duckdb::enable_shared_from_this<sirius_pipeline> 
     return std::unique_lock<std::mutex>(_execution_mutex);
   }
 
-  /// PARTITION pipelines are finalized as one operator whose metadata is
-  /// immutable before task publication and whose outputs are task-local.
-  [[nodiscard]] bool permits_concurrent_tasks() const noexcept
-  {
-    return operators.size() == 1 &&
-           operators.front().get().type == op::SiriusPhysicalOperatorType::PARTITION;
-  }
-
  private:
   //! Whether or not the pipeline has been readied
   bool ready;
