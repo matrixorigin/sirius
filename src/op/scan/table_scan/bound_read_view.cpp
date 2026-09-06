@@ -1,3 +1,4 @@
+#include "tae_scanner.hpp"
 /*
  * Copyright 2026, Sirius Contributors.
  *
@@ -385,6 +386,32 @@ bound_read_view capture(capture_input input, duckdb::ClientContext& context)
                                                attached.GetStorageManager().GetDBPath()};
     view.provider      = provider_borrow{
       context.transaction.GetActiveQuery(), view.transaction_id, &context, &table.GetStorage()};
+  } else if (source->kind == source_kind::tae) {
+    auto const* typed = dynamic_cast<tae::TAEScanBindData const*>(input.bind_data);
+    if (!typed) throw std::runtime_error("TAE capture has no TAEScanBindData");
+    identity.bound_types.assign(typed->all_col_types.begin(), typed->all_col_types.end());
+    identity.bound_names.assign(typed->all_col_names.begin(), typed->all_col_names.end());
+    auto& selector = identity.selector;
+    append(selector, 'd', typed->data_dir);
+    append(selector, 'd', typed->db_name);
+    append(selector, 't', typed->table_name);
+    number(selector, typed->sort_column_idx);
+    for (auto value : typed->all_col_mo_oids) number(selector, value);
+    for (auto value : typed->all_col_widths) number(selector, value);
+    for (auto value : typed->all_col_scales) number(selector, value);
+    for (auto value : typed->all_col_seqnums) number(selector, value);
+    for (auto const& object : typed->objects) {
+      owned_paths.push_back(duckdb::FileSystem::JoinPath(typed->data_dir, object.file_path));
+      append(selector, 'p', object.file_path);
+      number(selector, object.rows);
+      number(selector, object.blocks);
+      number(selector, object.size_bytes);
+      append(selector, 'z', std::string(reinterpret_cast<char const*>(object.sort_key_zm.data()),
+                                       object.sort_key_zm.size()));
+    }
+    paths = {owned_paths, {}};
+    path_info = analyze_paths(paths);
+    identity.data_view = file_inventory{static_cast<uint32_t>(paths.size())};
   } else if (source->kind == source_kind::stream_source) {
     auto const* typed = dynamic_cast<exec::stream_source_bind_data const*>(input.bind_data);
     if (!typed) throw std::runtime_error("stream capture has no stream_source_bind_data");

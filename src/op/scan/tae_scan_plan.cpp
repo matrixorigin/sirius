@@ -154,6 +154,11 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
     }
   }
 
+  // Build the C → C-sorted-batch-position map before resolving the output
+  // projection below. `post_filter_projection_ids` is expressed in the
+  // converter's batch space, so it must never observe the initial empty map.
+  plan.batch_column_map = build_batch_column_map_local(projection_ids, column_ids.size());
+
   // Map output C positions to the converter's emergent C-sorted decoded
   // columns[] positions. `projection_ids` indexes column_ids, whereas the
   // converter emits only materialized columns; using the raw C position here
@@ -172,11 +177,9 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
     }
   }
 
-  // Filter-pushdown side: build the batch column map once, extract zone-map
-  // filters once, and dedup their seqnums once. compute_task previously
-  // rebuilt the seqnum dedup on every task call.
-  plan.batch_column_map = build_batch_column_map_local(projection_ids, column_ids.size());
-
+  // Filter-pushdown side: extract zone-map filters once, and dedup their
+  // seqnums once. compute_task previously rebuilt the seqnum dedup on every
+  // task call.
   if (table_filters) {
     for (auto& [col_idx, filter] : table_filters->filters) {
       if (col_idx >= column_ids.size()) continue;

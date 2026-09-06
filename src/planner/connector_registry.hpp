@@ -103,6 +103,11 @@ std::span<connector const> registered_connectors();
 void register_scan_source_callbacks(duckdb::DatabaseInstance&);
 
 // These wrappers keep the existing format builders and admission gates at their original sites.
+duckdb::unique_ptr<op::sirius_physical_operator> lower_tae_scan(
+  op::sirius_physical_table_scan&,
+  operator_params const&,
+  duckdb::ClientContext&,
+  op::scan::dynamic_filter_apply_mode);
 duckdb::unique_ptr<op::sirius_physical_operator> lower_native_scan(
   op::sirius_physical_table_scan&,
   operator_params const&,
