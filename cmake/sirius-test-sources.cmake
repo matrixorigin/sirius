@@ -1,5 +1,6 @@
 # cmake-format: off
 set(TEST_SOURCES
+    test/cpp/integration/test_gpu_execution_tae_scan.cpp
     test/cpp/scan_manager/test_preparation_readiness.cpp
     test/cpp/scan_manager/test_preparation.cpp
     test/cpp/scan_manager/test_preparation_unit.cpp
