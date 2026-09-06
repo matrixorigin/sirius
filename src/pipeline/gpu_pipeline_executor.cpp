@@ -26,6 +26,7 @@
 #include "op/sirius_physical_operator.hpp"
 #include "op/sirius_physical_operator_type.hpp"
 #include "pipeline/completion_handler.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "pipeline/oom_reschedule_exception.hpp"
 #include "pipeline/task_request.hpp"
 #include "telemetry-bridge/gen/quent.hpp"
@@ -45,8 +46,22 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 namespace sirius {
 namespace pipeline {
+
+namespace {
+
+void quarantine_poisoned_stream(cucascade::memory::borrowed_stream stream) noexcept
+{
+  // Prevent the RAII callback from returning a poisoned CUDA stream to the pool.
+  static std::mutex mutex;
+  static auto* streams = new std::vector<std::unique_ptr<cucascade::memory::borrowed_stream>>;
+  std::lock_guard lock(mutex);
+  streams->push_back(std::make_unique<cucascade::memory::borrowed_stream>(std::move(stream)));
+}
+
+}  // namespace
 
 gpu_pipeline_executor::gpu_pipeline_executor(
   sirius::exec::query_lifecycle_registry& lifecycle,
@@ -424,6 +439,13 @@ void gpu_pipeline_executor::process_task(
           if (completion) completion->record_task_started();
           task->execute(::cuda::stream_ref{exc_stream.get()});
           _tasks_executed.fetch_add(1, std::memory_order_relaxed);
+        } catch (const gpu_stream_quiescence_error& fatal) {
+          quarantine_poisoned_stream(std::move(exc_stream));
+          SIRIUS_LOG_ERROR("GPU Pipeline Executor: fatal stream quiescence failure: {}",
+                           fatal.what());
+          if (_task_creator) { _task_creator->stop(); }
+          if (completion) { completion->report_error(std::current_exception()); }
+          return;
         } catch (task_reschedule_exception& ex) {
           // Only THIS query's error state suppresses the reschedule. Previously one query's
           // failure silently stopped every other query's tasks from rescheduling.
@@ -436,9 +458,6 @@ void gpu_pipeline_executor::process_task(
             }
             return;
           }
-
-          // Sync the stream to ensure all memory is released before the reschedule.
-          exc_stream->synchronize();
 
           // Determine retry count and original task ID for this rescheduled attempt.
           auto* cur_local = dynamic_cast<gpu_pipeline_task_local_state*>(gpu_task->local_state());
