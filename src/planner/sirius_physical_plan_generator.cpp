@@ -50,6 +50,7 @@
 #include "op/scan/parquet_gpu_ingestible.hpp"
 #include "op/scan/sirius_gpu_scan_operator.hpp"
 #include "op/scan/sirius_physical_dynamic_filter.hpp"
+#include "op/scan/tae_gpu_ingestible.hpp"
 #include "op/sirius_physical_column_data_scan.hpp"
 #include "op/sirius_physical_concat.hpp"
 #include "op/sirius_physical_delim_join.hpp"
@@ -719,6 +720,37 @@ build_duckdb_native_table_info(sirius::op::sirius_physical_table_scan& scan_op,
   info->projected_output_count = scan_op.projected_output_count;
   info->returned_types         = scan_op.returned_types;
   info->output_types           = scan_op.types;
+  return info;
+}
+
+//! Build a TAE scanner binding for the current generic GPU_SCAN path. The
+//! scanner's bind data remains owned by the CPU plan, so retain a private copy
+//! for metadata workers that can outlive plan conversion.
+std::unique_ptr<sirius::op::scan::tae_ingestible_table_info> build_tae_table_info(
+  sirius::op::sirius_physical_table_scan& scan_op, duckdb::ClientContext& context)
+{
+  if (!scan_op.bind_data) {
+    throw std::runtime_error(
+      "[sirius_physical_plan_generator::build_tae_table_info] tae_scan has no bind data");
+  }
+
+  auto copied_bind_data = scan_op.bind_data->Copy();
+  if (dynamic_cast<tae::TAEScanBindData*>(copied_bind_data.get()) == nullptr) {
+    throw std::runtime_error(
+      "[sirius_physical_plan_generator::build_tae_table_info] tae_scan bind data is not "
+      "TAEScanBindData");
+  }
+
+  auto info       = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
+  info->bind_data = duckdb::unique_ptr<tae::TAEScanBindData>(
+    static_cast<tae::TAEScanBindData*>(copied_bind_data.release()));
+  info->returned_types = scan_op.returned_types;
+  info->column_ids     = scan_op.column_ids;
+  info->projection_ids = scan_op.projection_ids;
+  info->output_types   = scan_op.types;
+  info->names          = scan_op.names;
+  info->context        = &context;
+  if (scan_op.table_filters) { info->table_filters = scan_op.table_filters->Copy(); }
   return info;
 }
 
@@ -1819,6 +1851,17 @@ bool compressed_materialization_active(duckdb::ClientContext& context)
 }
 
 }  // namespace
+
+duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_tae_scan(
+  sirius::op::sirius_physical_table_scan& scan,
+  sirius::operator_params const& op_params,
+  duckdb::ClientContext& context,
+  sirius::op::scan::dynamic_filter_apply_mode mode)
+{
+  auto state = context.registered_state
+    ? context.registered_state->Get<duckdb::SiriusContext>("sirius_state") : nullptr;
+  return make_gpu_scan_leaf(build_tae_table_info(scan, context), scan, op_params, mode, state.get());
+}
 
 duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_native_scan(
   sirius::op::sirius_physical_table_scan& scan,

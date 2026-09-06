@@ -181,6 +181,19 @@ class host_tae_representation : public cucascade::idata_representation {
                           std::vector<std::size_t> post_filter_projection_ids      = {},
                           std::unique_ptr<host_tae_input_lease> input_lease        = nullptr);
 
+  /// Shares scanner-owned pinned bytes with a retryable scan split. The copy
+  /// used for each materialization keeps those bytes live until GPU conversion
+  /// has finished, while the split remains reusable after an OOM retry.
+  host_tae_representation(cucascade::memory::memory_space* memory_space,
+                          std::shared_ptr<pinned_host_buffer> host_data,
+                          std::vector<column_chunk_info> chunks,
+                          std::size_t total_rows,
+                          std::size_t compressed_bytes,
+                          std::size_t uncompressed_bytes,
+                          std::shared_ptr<translated_expression> filter_expression = nullptr,
+                          std::vector<std::size_t> post_filter_projection_ids      = {},
+                          std::unique_ptr<host_tae_input_lease> input_lease        = nullptr);
+
   // idata_representation interface
   std::unique_ptr<idata_representation> clone(rmm::cuda_stream_view stream) override;
   [[nodiscard]] std::size_t get_size_in_bytes() const override;
