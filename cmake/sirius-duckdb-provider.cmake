@@ -12,7 +12,7 @@ endif()
 
 function(sirius_add_duckdb_source)
   # Keep DuckDB options scoped to its dependency build.
-  set(DUCKDB_EXTENSION_CONFIGS "")
+  set(DUCKDB_EXTENSION_CONFIGS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/sirius-tae-extension.cmake")
   set(BUILD_EXTENSIONS "core_functions;parquet")
   set(BUILD_SHELL OFF)
   set(BUILD_UNITTESTS OFF)
