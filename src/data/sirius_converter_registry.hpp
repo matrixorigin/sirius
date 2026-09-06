@@ -17,6 +17,7 @@
 #pragma once
 
 #include <compression/compression_converters.hpp>
+#include <data/host_tae_representation_converters.hpp>
 #include <cucascade/cudf/builtin_converters.hpp>
 #include <cucascade/cudf/gpu_data_representation.hpp>
 #include <cucascade/cudf/host_data_representation.hpp>
@@ -62,6 +63,7 @@ class converter_registry {
     auto registry = std::make_unique<registry_type>();
     cucascade::register_builtin_converters(*registry);
     sirius::register_compression_converters(*registry);
+    sirius::register_tae_converters(*registry);
     sirius::spill::register_chunked_spill_converters(*registry, copy_chunk_bytes);
     copy_chunk_bytes_ = copy_chunk_bytes;
     instance_         = std::move(registry);
