@@ -945,7 +945,8 @@ plan_lineage collect_semantic_lineage(
     auto& scan = node.Cast<op::sirius_physical_table_scan>();
     plan_lineage result;
     result.columns.resize(scan.types.size());
-    if (scan.function.GetName() != "seq_scan" && scan.children.empty() && !scan.pre_declined) {
+    if (scan.function.GetName() != "seq_scan" && scan.function.GetName() != "tae_scan" &&
+        scan.children.empty() && !scan.pre_declined) {
       op::scan::parquet_ingestible_table_info info;
       populate_parquet_schema(info, scan, context);
       // Lineage must permit the same carrier-free virtual layout as the plain
@@ -1246,6 +1247,8 @@ void certify_table_scan(duckdb::unique_ptr<sirius::op::sirius_physical_operator>
   auto materializer_kind = sirius::op::scan::materializer_kind::parquet;
   if (entry->kind == sirius::op::scan::source_kind::duckdb_native) {
     materializer_kind = sirius::op::scan::materializer_kind::duckdb_native;
+  } else if (entry->kind == sirius::op::scan::source_kind::tae) {
+    materializer_kind = sirius::op::scan::materializer_kind::tae;
   } else if (entry->function_name == "iceberg_scan") {
     materializer_kind = sirius::op::scan::materializer_kind::iceberg;
   }

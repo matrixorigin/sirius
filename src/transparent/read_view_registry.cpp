@@ -493,6 +493,8 @@ op::scan::scan_contract_id read_view_registry::allocate_declined_scan(
   auto kind = op::scan::materializer_kind::parquet;
   if (connector.kind == op::scan::source_kind::duckdb_native) {
     kind = op::scan::materializer_kind::duckdb_native;
+  } else if (connector.kind == op::scan::source_kind::tae) {
+    kind = op::scan::materializer_kind::tae;
   } else if (connector.kind == op::scan::source_kind::stream_source) {
     kind = op::scan::materializer_kind::stream;
   } else if (connector.function_name == "iceberg_scan") {
@@ -621,6 +623,7 @@ scan_contract_id allocate_scan_contract(transparent::read_view_registry& registr
     case materializer_kind::iceberg:
       eligibility.later_checks = check_bit(later_check::footer_per_file);
       break;
+    case materializer_kind::tae:
     case materializer_kind::stream: eligibility.later_checks = {}; break;
   }
 

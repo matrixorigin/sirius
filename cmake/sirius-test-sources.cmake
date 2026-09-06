@@ -5,6 +5,7 @@ set(TEST_SOURCES
     test/cpp/io/test_parquet_metadata_retention.cpp
     test/cpp/io/cache/test_metadata_store.cpp
     test/cpp/io/test_object_identity.cpp
+    test/cpp/integration/test_gpu_execution_tae_scan.cpp
     test/cpp/scan_manager/test_preparation_readiness.cpp
     test/cpp/scan_manager/test_coordinator_pool.cpp
     test/cpp/scan_manager/test_preparation_output_lifetime.cpp
