@@ -26,6 +26,7 @@
 #include "op/scan/sirius_gpu_scan_operator_data.hpp"
 #include "op/sirius_physical_operator.hpp"
 #include "pipeline/gpu_pipeline_task.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "pipeline/oom_reschedule_exception.hpp"
 #include "pipeline/pipeline_memory_history.hpp"
 #include "pipeline/repository_wiring.hpp"
@@ -114,6 +115,61 @@ class stub_operator : public sirius::op::sirius_physical_operator {
   sink_fn on_sink;
   std::optional<std::size_t> no_history_estimate_override;
   bool acts_as_sink = false;
+};
+
+class injected_quiescence_failure_task final : public sirius::pipeline::gpu_pipeline_task {
+ public:
+  injected_quiescence_failure_task(
+    uint64_t task_id,
+    std::unique_ptr<sirius::pipeline::sirius_pipeline_task_local_state> local_state,
+    std::shared_ptr<sirius::pipeline::sirius_pipeline_task_global_state> global_state,
+    std::weak_ptr<cucascade::data_batch> expected_input)
+    : gpu_pipeline_task(task_id, {}, std::move(local_state), std::move(global_state)),
+      _expected_input(std::move(expected_input))
+  {
+  }
+
+  [[nodiscard]] bool input_was_alive_during_quiescence() const
+  {
+    return _input_was_alive_during_quiescence;
+  }
+
+  [[nodiscard]] bool has_quarantined_input() const { return _quarantined_input != nullptr; }
+
+ protected:
+  void synchronize_task_stream(::cuda::stream_ref stream) override
+  {
+    if (++_synchronize_attempts == 1) {
+      stream.synchronize();
+      return;
+    }
+    _input_was_alive_during_quiescence = !_expected_input.expired();
+    throw std::runtime_error("injected CUDA stream synchronization failure");
+  }
+
+  void quarantine_failed_task_owners(
+    std::unique_ptr<sirius::op::operator_data> input,
+    std::unique_ptr<sirius::op::operator_data> pending_output,
+    std::unique_ptr<sirius::op::operator_data> materialized_input,
+    std::unique_ptr<sirius::op::operator_data> output,
+    std::unique_ptr<sirius::op::operator_data> rescheduled_input) noexcept override
+  {
+    _quarantined_input        = std::move(input);
+    _quarantined_pending      = std::move(pending_output);
+    _quarantined_materialized = std::move(materialized_input);
+    _quarantined_output       = std::move(output);
+    _quarantined_rescheduled  = std::move(rescheduled_input);
+  }
+
+ private:
+  std::weak_ptr<cucascade::data_batch> _expected_input;
+  std::size_t _synchronize_attempts{0};
+  bool _input_was_alive_during_quiescence{false};
+  std::unique_ptr<sirius::op::operator_data> _quarantined_input;
+  std::unique_ptr<sirius::op::operator_data> _quarantined_pending;
+  std::unique_ptr<sirius::op::operator_data> _quarantined_materialized;
+  std::unique_ptr<sirius::op::operator_data> _quarantined_output;
+  std::unique_ptr<sirius::op::operator_data> _quarantined_rescheduled;
 };
 
 class sized_input : public sirius::op::operator_data {
@@ -605,6 +661,72 @@ std::shared_ptr<cucascade::data_batch> make_riding_batch(std::size_t num_rows,
 }
 
 }  // namespace
+
+TEST_CASE("gpu_pipeline_task retains input owner through failed quiescence",
+          "[gpu_pipeline_task][failure_lifetime]")
+{
+  constexpr std::size_t kReservationSize = 20ULL * 1024 * 1024;
+
+  pipeline_task_history_fixture fixture;
+  if (!fixture.setup()) {
+    WARN("Skipping test — no GPU available");
+    return;
+  }
+
+  rmm::cuda_stream stream, stream_data_init;
+  auto input_batch = fixture.create_gpu_data_batch(1, stream_data_init);
+  std::weak_ptr<cucascade::data_batch> input_lifetime = input_batch;
+
+  auto ctx = create_pipeline_context();
+  ctx.stub_op->on_execute =
+    [](const sirius::op::operator_data& input,
+       rmm::cuda_stream_view task_stream) -> std::unique_ptr<sirius::op::operator_data> {
+    auto const& pipelineable_input =
+      dynamic_cast<const sirius::op::pipelineable_operator_data&>(input);
+    auto const& batch = pipelineable_input.get_data_batches().front();
+    auto const table  = sirius::get_cudf_table_view(*batch);
+    auto const column = table.column(0);
+    auto const status = cudaMemsetAsync(
+      const_cast<int64_t*>(column.data<int64_t>()), 0, sizeof(int64_t), task_stream.value());
+    if (status != cudaSuccess) {
+      throw std::runtime_error(std::string("failed to enqueue test GPU work: ") +
+                               cudaGetErrorString(status));
+    }
+    throw std::runtime_error("injected operator failure after GPU launch");
+  };
+
+  auto global_state = std::make_shared<sirius::pipeline::sirius_pipeline_task_global_state>(
+    ctx.pipeline, sirius::test::make_test_telemetry_context());
+  std::vector<std::shared_ptr<cucascade::data_batch>> batches;
+  batches.push_back(std::move(input_batch));
+  auto local_state = std::make_unique<sirius::pipeline::gpu_pipeline_task_local_state>(
+    std::make_unique<sirius::op::pipelineable_operator_data>(std::move(batches)));
+
+  auto task = std::make_unique<injected_quiescence_failure_task>(
+    1, std::move(local_state), std::move(global_state), input_lifetime);
+  auto reservation = fixture.manager->request_reservation(
+    cucascade::memory::any_memory_space_in_tier{cucascade::memory::Tier::GPU}, kReservationSize);
+  REQUIRE(reservation != nullptr);
+  auto* reservation_allocator = reservation->get_memory_resource_of<cucascade::memory::Tier::GPU>();
+  REQUIRE(reservation_allocator != nullptr);
+  auto* task_local =
+    dynamic_cast<sirius::pipeline::gpu_pipeline_task_local_state*>(task->local_state());
+  REQUIRE(task_local != nullptr);
+  task_local->set_reservation(std::move(reservation),
+                              task->get_estimated_reservation_size_info(fixture.gpu_space));
+
+  REQUIRE_THROWS_AS(task->execute(stream), sirius::pipeline::gpu_stream_quiescence_error);
+  CHECK(task->input_was_alive_during_quiescence());
+  CHECK(task->has_quarantined_input());
+  CHECK_FALSE(input_lifetime.expired());
+
+  // The injected synchronization failed without poisoning the real stream.
+  // Synchronize it before releasing the test-owned quarantine and attachment.
+  REQUIRE_NOTHROW(stream.synchronize());
+  reservation_allocator->reset_stream_reservation(stream);
+  task.reset();
+  CHECK(input_lifetime.expired());
+}
 
 TEST_CASE("materialization peak classifies Simpatico compression by representation type",
           "[gpu_pipeline_task][materialization][compression]")
