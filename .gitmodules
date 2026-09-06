@@ -36,3 +36,6 @@
 [submodule "sirius-duckdb/extension-ci-tools"]
 	path = sirius-duckdb/extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools.git
+[submodule "tae-scanner"]
+	path = tae-scanner
+	url = https://github.com/matrixorigin/duckdb-tae-scanner.git
