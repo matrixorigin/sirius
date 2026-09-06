@@ -315,8 +315,26 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
   virtual std::unique_ptr<gpu_pipeline_task> create_rescheduled_task(
     uint64_t task_id, std::unique_ptr<sirius_pipeline_task_local_state> local_state);
 
+ protected:
+  /// Synchronize task-owned work before releasing any GPU input/output owner.
+  virtual void synchronize_task_stream(::cuda::stream_ref stream);
+
+  /// Transfer owners that may still back a poisoned stream. Production retains
+  /// them until fail-stop exit, rather than destroying them against that stream.
+  virtual void quarantine_failed_task_owners(
+    std::unique_ptr<op::operator_data> input,
+    std::unique_ptr<op::operator_data> pending_output,
+    std::unique_ptr<op::operator_data> materialized_input,
+    std::unique_ptr<op::operator_data> output,
+    std::unique_ptr<op::operator_data> rescheduled_input) noexcept;
+
  private:
   std::vector<cucascade::shared_data_repository*> _data_repos;
+  // These owners outlive compute_task() and sink processing so failure handling
+  // can synchronize before any GPU-backed allocation is released.
+  std::unique_ptr<op::operator_data> _in_flight_data;
+  std::unique_ptr<op::operator_data> _pending_output_data;
+  std::unique_ptr<op::operator_data> _materialized_input_data;
   cucascade::memory::reservation_aware_resource_adaptor* _allocator = nullptr;
   /// Non-owning subscription ledger: the input data_batches this task subscribed to in its
   /// constructor so that the downgrade_executor can know that the data_baches are in a task.
