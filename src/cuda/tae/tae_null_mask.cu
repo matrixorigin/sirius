@@ -58,12 +58,29 @@ __global__ void batched_invert_mask_kernel(const BatchedNullMaskDesc* __restrict
 {
   auto const& desc = descs[blockIdx.y];
   uint32_t n_words = (desc.n_rows + 31) / 32;
-  auto const* src  = reinterpret_cast<const uint32_t*>(desc.src);
-  auto* out        = dst + desc.bitmask_word_offset;
+  uint64_t source_bytes;
+  memcpy(&source_bytes, desc.src + 16, sizeof(source_bytes));
+  uint32_t const dst_word_offset = desc.bitmask_row_offset / 32;
+  uint32_t const dst_bit_offset  = desc.bitmask_row_offset % 32;
 
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_words;
        i += gridDim.x * blockDim.x) {
-    out[i] = ~src[i];
+    // Serialized vector sections need not start on a word boundary.
+    uint32_t null_bits = 0;
+    if (static_cast<uint64_t>(i) * sizeof(uint32_t) >= source_bytes) { continue; }
+    memcpy(&null_bits, desc.src + 24 + i * sizeof(uint32_t), sizeof(null_bits));
+    if (i + 1 == n_words && desc.n_rows % 32 != 0) {
+      null_bits &= (uint32_t{1} << (desc.n_rows % 32)) - 1;
+    }
+    if (null_bits == 0) { continue; }
+
+    // The destination starts ALL_VALID. Clear only the source NULL bits so
+    // unaligned adjacent chunks can safely share a destination word.
+    atomicAnd(dst + dst_word_offset + i, ~(null_bits << dst_bit_offset));
+    if (dst_bit_offset != 0) {
+      uint32_t const high_null_bits = null_bits >> (32 - dst_bit_offset);
+      if (high_null_bits != 0) { atomicAnd(dst + dst_word_offset + i + 1, ~high_null_bits); }
+    }
   }
 }
 

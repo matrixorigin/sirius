@@ -20,13 +20,16 @@ namespace sirius::op::scan {
 
 class mo_native_scan_task_global_state final : public pipeline::sirius_pipeline_task_global_state {
  public:
-  mo_native_scan_task_global_state(duckdb::shared_ptr<pipeline::sirius_pipeline> pipeline,
-                                   sirius_physical_gpu_mo_scan* scan_op,
-                                   cucascade::memory::memory_space* host_memory_space);
+  mo_native_scan_task_global_state(
+    duckdb::shared_ptr<pipeline::sirius_pipeline> pipeline,
+    sirius_physical_gpu_mo_scan* scan_op,
+    cucascade::memory::memory_space* host_memory_space,
+    std::size_t source_batch_target_bytes   = offload::max_expanded_native_batch_bytes,
+    std::size_t source_batch_capacity_bytes = offload::max_expanded_native_batch_bytes);
 
   bool try_claim_task() noexcept;
   void finish_eof() noexcept;
-  void acknowledge(std::uint64_t sequence) noexcept;
+  bool acknowledge(std::uint64_t sequence);
   void release_after_h2d() noexcept;
 
   [[nodiscard]] sirius_physical_gpu_mo_scan& get_operator() const { return *_scan_op; }
@@ -34,18 +37,37 @@ class mo_native_scan_task_global_state final : public pipeline::sirius_pipeline_
   {
     return _host_memory_space;
   }
+  [[nodiscard]] std::size_t get_source_batch_target_bytes() const noexcept
+  {
+    return _source_batch_target_bytes;
+  }
+  [[nodiscard]] std::size_t get_source_batch_capacity_bytes() const noexcept
+  {
+    return _source_batch_capacity_bytes;
+  }
 
  private:
   sirius_physical_gpu_mo_scan* _scan_op;
   cucascade::memory::memory_space* _host_memory_space;
+  std::size_t _source_batch_target_bytes;
+  std::size_t _source_batch_capacity_bytes;
 };
 
 class mo_native_scan_task_local_state final : public pipeline::sirius_pipeline_task_local_state {
  public:
+  explicit mo_native_scan_task_local_state(
+    std::size_t reservation_bytes = offload::mo_native_scan_reservation_bytes())
+    : _reservation_bytes(reservation_bytes)
+  {
+  }
+
   [[nodiscard]] std::size_t get_task_consumption_basis() const override
   {
-    return offload::mo_native_scan_reservation_bytes();
+    return _reservation_bytes;
   }
+
+ private:
+  std::size_t _reservation_bytes;
 };
 
 class mo_native_scan_task final : public pipeline::sirius_pipeline_itask {

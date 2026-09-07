@@ -38,6 +38,7 @@
 #include <duckdb/execution/execution_context.hpp>
 #include <duckdb/parallel/thread_context.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 
@@ -148,12 +149,19 @@ void task_creator::prepare_for_query(const sirius::planner::query& query)
       if (host_spaces.empty()) {
         throw std::runtime_error("[task_creator] No HOST memory space configured for GPU MO scan");
       }
+      const auto& op_params =
+        _client_context->registered_state->Get<duckdb::SiriusContext>("sirius_state")
+          ->get_config()
+          .get_operator_params();
+      const auto source_batch_target = std::min<std::size_t>(
+        op_params.scan_task_batch_size, offload::max_expanded_native_batch_bytes);
       _mo_native_scan_operator_global_state_map.emplace(
         operator_id,
         std::make_shared<op::scan::mo_native_scan_task_global_state>(
           pipeline,
           &source_operator->Cast<op::sirius_physical_gpu_mo_scan>(),
-          const_cast<cucascade::memory::memory_space*>(host_spaces[0])));
+          const_cast<cucascade::memory::memory_space*>(host_spaces[0]),
+          source_batch_target));
     } else {
       auto gs = std::make_shared<pipeline::gpu_pipeline_task_global_state>(pipeline);
       _gpu_operator_global_state_map.emplace(operator_id, std::move(gs));
@@ -436,8 +444,9 @@ void task_creator::manager_loop()
           }
           SIRIUS_LOG_DEBUG("[mo_native_scan] creating native scan task");
           pipeline->mark_task_created();
-          auto local = std::make_unique<op::scan::mo_native_scan_task_local_state>();
-          auto task  = std::make_unique<op::scan::mo_native_scan_task>(
+          auto local = std::make_unique<op::scan::mo_native_scan_task_local_state>(
+            global->get_source_batch_capacity_bytes());
+          auto task = std::make_unique<op::scan::mo_native_scan_task>(
             get_next_task_id(), destination_data_repositories[0], std::move(local), global);
           _task_scheduler->schedule(std::move(task));
         } else if (node->type == ::sirius::op::SiriusPhysicalOperatorType::GPU_TAE_SCAN) {
