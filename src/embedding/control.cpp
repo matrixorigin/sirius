@@ -3,6 +3,9 @@
  */
 #include "embedding/control.hpp"
 
+#include "embedding/input.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -34,6 +37,8 @@ sirius_error current_error() noexcept
     throw;
   } catch (failure const& e) {
     return e.error;
+  } catch (pipeline::gpu_stream_quiescence_error const& e) {
+    return error(SIRIUS_GPU_UNAVAILABLE, e.what());
   } catch (std::bad_alloc const&) {
     return error(SIRIUS_RESOURCE_EXHAUSTED, "native allocation failed");
   } catch (std::exception const& e) {
@@ -75,6 +80,7 @@ std::shared_ptr<query_state> engine_control::create(std::string_view plan,
   // Admission precedes the bounded copy; rejected concurrent callers do not
   // each allocate a maximum-size plan outside the query-count limit.
   auto q      = std::make_shared<query_state>();
+  q->inputs   = std::make_shared<input_registry>();
   q->plan     = plan;
   q->deadline = clock::now() + timeout;
   for (std::size_t i = 0; i < queries_.size(); ++i) {
@@ -107,6 +113,34 @@ sirius_error engine_control::prepare(std::shared_ptr<query_state> const& q,
         lock, duration, [&] { return q->phase == query_phase::PREPARED || terminal(*q); }))
     return error(SIRIUS_TIMEOUT, "waiting for native preparation timed out");
   return q->result;
+}
+std::shared_ptr<native_input> engine_control::register_input(std::shared_ptr<query_state> const& q,
+                                                             uint64_t id,
+                                                             const sirius_input_column* columns,
+                                                             uint32_t count)
+{
+  if (count > input_columns_limit || (count && !columns))
+    throw failure(SIRIUS_INVALID_ARGUMENT, "invalid native input schema");
+  std::lock_guard lock(mutex_);
+  if (q->phase != query_phase::CREATED || !accepting_ || q->stop.stop_requested())
+    throw failure(SIRIUS_INVALID_STATE, "input registration requires a created query");
+  if (q->inputs->reads.size() == 16)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native query read limit reached");
+  for (auto const& read : q->inputs->reads)
+    if (read->id == id) throw failure(SIRIUS_INVALID_ARGUMENT, "duplicate native input binding");
+  std::vector<sirius_input_column> schema;
+  if (count) schema.assign(columns, columns + count);
+  auto read =
+    std::make_shared<native_input>(id, std::move(schema), q->stop.get_token(), q->deadline);
+  q->inputs->reads.push_back(read);
+  ++q->inputs->handles;
+  return read;
+}
+void engine_control::require_input_active(std::shared_ptr<query_state> const& q)
+{
+  std::lock_guard lock(mutex_);
+  if (q->phase != query_phase::PREPARED && q->phase != query_phase::RUNNING)
+    throw failure(SIRIUS_INVALID_STATE, "native input requires successful query preparation");
 }
 sirius_error engine_control::start(std::shared_ptr<query_state> const& q)
 {
@@ -148,6 +182,8 @@ sirius_error engine_control::close_query(std::shared_ptr<query_state> const& q,
   // confusing a quiesced expired query with a still-running wait timeout.
   std::lock_guard lock(mutex_);
   if (!quiesced(*q) || result.code == SIRIUS_GPU_UNAVAILABLE) return result;
+  if (q->inputs->handles || q->inputs->filling_handles)
+    return error(SIRIUS_BUSY, "close outstanding native input handles and leases first");
   if (q->phase != query_phase::CLOSED) {
     q->phase = query_phase::CLOSED;
     queries_[q->slot].reset();
@@ -200,7 +236,7 @@ void engine_control::process(engine_backend& backend,
   try {
     if (q->stop.stop_requested()) throw failure(SIRIUS_CANCELLED, "native query cancelled");
     if (clock::now() >= q->deadline) throw failure(SIRIUS_TIMEOUT, "native query deadline expired");
-    driver = backend.prepare(q->plan, q->stop.get_token(), q->deadline);
+    driver = backend.prepare_inputs(q->plan, *q->inputs, q->stop.get_token(), q->deadline);
     if (!driver) throw failure(SIRIUS_EXECUTION_FAILED, "native backend returned no query owner");
     {
       std::unique_lock lock(mutex_);
@@ -238,6 +274,10 @@ void engine_control::process(engine_backend& backend,
     (void)driver.release();
   } else {
     driver.reset();
+    auto producer_error = q->inputs->outcome();
+    if (producer_error.code) result = producer_error;
+    q->inputs->stop();
+    q->inputs->discard();
   }
   {
     std::lock_guard lock(mutex_);

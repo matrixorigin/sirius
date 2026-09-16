@@ -219,6 +219,7 @@ void task_scheduler::start_query(const planner::query& query)
   }
 
   // The caller already holds the future from its own completion handler.
+  _task_creator->arm_live_inputs(query);
   _task_creator->schedule(scans.front());
 }
 

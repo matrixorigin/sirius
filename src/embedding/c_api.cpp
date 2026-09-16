@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "embedding/control.hpp"
+#include "embedding/input.hpp"
 #include "sirius_c.h"
 
 #include <chrono>
@@ -19,6 +20,22 @@ struct sirius_engine_handle {
 struct sirius_query_handle {
   std::shared_ptr<engine_control> control;
   std::shared_ptr<query_state> state;
+};
+struct sirius_input_handle {
+  std::shared_ptr<engine_control> control;
+  std::shared_ptr<query_state> query;
+  std::shared_ptr<sirius::embedding::native_input> input;
+};
+struct sirius_batch_handle {
+  std::shared_ptr<query_state> query;
+  std::shared_ptr<sirius::embedding::input_batch> batch;
+  ~sirius_batch_handle()
+  {
+    if (batch) {
+      batch.reset();
+      --query->inputs->filling_handles;
+    }
+  }
 };
 
 namespace {
@@ -177,5 +194,129 @@ extern "C" sirius_status sirius_query_close(sirius_query_handle** query,
       *query = nullptr;
     }
     return status;
+  });
+}
+
+extern "C" sirius_status sirius_input_register(sirius_query_handle* query,
+                                               uint64_t id,
+                                               const sirius_input_column* columns,
+                                               uint32_t count,
+                                               sirius_input_handle** out,
+                                               sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query && out && !*out, "invalid native input output");
+    auto handle     = std::make_unique<sirius_input_handle>();
+    handle->control = query->control;
+    handle->query   = query->state;
+    handle->input   = query->control->register_input(query->state, id, columns, count);
+    *out            = handle.release();
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_acquire(sirius_input_handle* input,
+                                              uint64_t bytes,
+                                              uint32_t wait_ms,
+                                              sirius_batch_handle** out,
+                                              sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input && out && !*out && bytes <= sirius::embedding::input_window,
+            "invalid native batch output or size");
+    auto outcome = input->input->outcome();
+    if (outcome.code) return outcome;
+    input->control->require_input_active(input->query);
+    auto handle   = std::make_unique<sirius_batch_handle>();
+    handle->query = input->query;
+    handle->batch = input->input->acquire(
+      bytes, sirius::embedding::clock::now() + std::chrono::milliseconds(wait_ms));
+    ++handle->query->inputs->filling_handles;
+    *out = handle.release();
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_write(sirius_batch_handle* batch,
+                                            uint64_t offset,
+                                            const void* data,
+                                            uint64_t bytes,
+                                            sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(batch && batch->batch && (data || !bytes), "invalid native batch write");
+    batch->batch->write(offset,
+                        {static_cast<const std::byte*>(data), static_cast<std::size_t>(bytes)});
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_publish(sirius_input_handle* input,
+                                              sirius_batch_handle** batch,
+                                              uint32_t rows,
+                                              const sirius_input_vector* columns,
+                                              uint32_t count,
+                                              sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input && batch && *batch && (columns || !count) &&
+              count <= sirius::embedding::input_columns_limit,
+            "invalid native batch publication");
+    input->input->publish((*batch)->batch, rows, {columns, count});
+    delete *batch;
+    *batch = nullptr;
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_finish(sirius_input_handle* input, sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input, "missing native input");
+    input->input->finish();
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_fail(sirius_input_handle* input,
+                                           const char* message,
+                                           uint32_t bytes,
+                                           sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input && message && bytes < SIRIUS_ERROR_MESSAGE_BYTES, "invalid producer error");
+    std::string owned(message, bytes);
+    input->input->stop(SIRIUS_EXECUTION_FAILED, owned.c_str());
+    input->control->cancel(input->query);
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_get_stats(sirius_input_handle* input,
+                                                sirius_input_stats* out,
+                                                sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input && out, "missing native input or stats output");
+    require_options(out);
+    *out = input->input->inspect();
+    return {};
+  });
+}
+extern "C" sirius_status sirius_input_close(sirius_input_handle** input, sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(input, "missing native input handle address");
+    if (!*input) return {};
+    // Closing a producer is not an implicit successful EOS.
+    if (!(*input)->input->finished() && !(*input)->input->outcome().code)
+      (*input)->control->cancel((*input)->query);
+    --(*input)->query->inputs->handles;
+    delete *input;
+    *input = nullptr;
+    return {};
+  });
+}
+extern "C" sirius_status sirius_batch_release(sirius_batch_handle** batch, sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(batch, "missing native batch handle address");
+    delete *batch;
+    *batch = nullptr;
+    return {};
   });
 }

@@ -16,6 +16,32 @@ extern "C" {
 typedef struct sirius_engine_handle sirius_engine_handle;
 typedef struct sirius_query_handle sirius_query_handle;
 typedef struct sirius_batch_handle sirius_batch_handle;
+typedef struct sirius_input_handle sirius_input_handle;
+
+/* MO native scalar OIDs; layout is little-endian, with 24-byte MO varlena.
+ * Only the scalar types documented in embedding-c-api.md are accepted. */
+typedef struct sirius_input_column {
+  uint32_t oid;
+  int32_t width;
+  int32_t scale;
+  uint32_t nullable;
+} sirius_input_column;
+
+enum { SIRIUS_VECTOR_FLAT = 0, SIRIUS_VECTOR_CONSTANT = 1, SIRIUS_VECTOR_NULL = 2 };
+typedef struct sirius_input_vector {
+  uint32_t vector_class;
+  uint32_t reserved;
+  uint64_t data_offset, data_bytes;
+  uint64_t area_offset, area_bytes;
+  /* Raw little-endian null words: 1 means NULL; omitted trailing words are zero. */
+  uint64_t null_offset, null_bytes;
+} sirius_input_vector;
+
+typedef struct sirius_input_stats {
+  uint32_t struct_size, abi_version;
+  uint64_t retained_bytes, peak_bytes, leases, queued_batches, filling_batches;
+  uint64_t blocked_acquires, source_units;
+} sirius_input_stats;
 
 typedef uint32_t sirius_status;
 enum {
@@ -115,6 +141,44 @@ sirius_status sirius_query_wait(sirius_query_handle* query, uint32_t wait_ms, si
 sirius_status sirius_query_close(sirius_query_handle** query,
                                  uint32_t wait_ms,
                                  sirius_error* error);
+
+/* Register while CREATED; acquire only after successful preparation. Each read
+ * has a strict 64 MiB window, including filling, queued and GPU/retry owners.
+ * Close/release require exclusive ownership of the affected handle. */
+sirius_status sirius_input_register(sirius_query_handle* query,
+                                    uint64_t binding_id,
+                                    const sirius_input_column* columns,
+                                    uint32_t column_count,
+                                    sirius_input_handle** out,
+                                    sirius_error* error);
+sirius_status sirius_input_acquire(sirius_input_handle* input,
+                                   uint64_t bytes,
+                                   uint32_t wait_ms,
+                                   sirius_batch_handle** out,
+                                   sirius_error* error);
+sirius_status sirius_input_write(sirius_batch_handle* batch,
+                                 uint64_t offset,
+                                 const void* data,
+                                 uint64_t bytes,
+                                 sirius_error* error);
+/* Publish copies descriptors. Success consumes *batch; failure preserves it.
+ * A zero-row batch is not EOF. Caller pointers are never retained. */
+sirius_status sirius_input_publish(sirius_input_handle* input,
+                                   sirius_batch_handle** batch,
+                                   uint32_t rows,
+                                   const sirius_input_vector* columns,
+                                   uint32_t column_count,
+                                   sirius_error* error);
+sirius_status sirius_input_finish(sirius_input_handle* input, sirius_error* error);
+sirius_status sirius_input_fail(sirius_input_handle* input,
+                                const char* message,
+                                uint32_t message_bytes,
+                                sirius_error* error);
+sirius_status sirius_input_get_stats(sirius_input_handle* input,
+                                     sirius_input_stats* out,
+                                     sirius_error* error);
+sirius_status sirius_input_close(sirius_input_handle** input, sirius_error* error);
+sirius_status sirius_batch_release(sirius_batch_handle** batch, sirius_error* error);
 
 #ifdef __cplusplus
 }
