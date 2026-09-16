@@ -263,6 +263,24 @@ class completion_handler {
   std::thread::id execution_owner;      // Set by execute before scan preparation is armed.
   bool non_rollbackable_state = false;  // Latched by the query thread before task submission.
 
+  // A root completion signal is not GPU quiescence. Keep fatal status even
+  // when another terminal signal already satisfied the one-shot promise.
+  void report_fatal_error(std::exception_ptr error) noexcept
+  {
+    {
+      std::lock_guard lock(_fatal_mutex);
+      if (!_fatal_error) _fatal_error = error;
+    }
+    _has_error.store(true);
+    report_error(std::move(error));
+  }
+
+  [[nodiscard]] std::exception_ptr fatal_error() const noexcept
+  {
+    std::lock_guard lock(_fatal_mutex);
+    return _fatal_error;
+  }
+
  private:
   // terminal -> failure -> publication. Never hold these locks while draining workers.
   void finish_error(std::exception_ptr error,
@@ -339,6 +357,8 @@ class completion_handler {
   std::optional<op::scan::verdict_reason> failure_reason_;
   std::shared_ptr<std::atomic<uint64_t>> tasks_started_;
   std::function<void(std::exception_ptr)> on_error_;
+  mutable std::mutex _fatal_mutex;
+  std::exception_ptr _fatal_error;
   std::promise<void> _promise;
   std::atomic<bool> _completed{false};
   std::atomic<bool> _has_error{false};

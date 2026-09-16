@@ -59,6 +59,7 @@ class SIRIUS_FFI_EXPORT Context {
  public:
   Context();
   explicit Context(const std::string& config_path);
+  Context(const std::string& config_path, uint32_t gpu_pipeline_threads);
   ~Context();
 
   Context(const Context&)            = delete;
