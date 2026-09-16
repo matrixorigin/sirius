@@ -19,6 +19,8 @@
 #include <thread>
 
 namespace sirius::embedding {
+class native_input;
+struct input_registry;
 using clock = std::chrono::steady_clock;
 void assign_error(sirius_error& out, sirius_status code, const char* message) noexcept;
 sirius_error current_error() noexcept;
@@ -42,7 +44,14 @@ class query_driver {
 
 class engine_backend {
  public:
-  virtual ~engine_backend()                                                 = default;
+  virtual ~engine_backend() = default;
+  virtual std::unique_ptr<query_driver> prepare_inputs(std::string_view plan,
+                                                       input_registry& inputs,
+                                                       std::stop_token stop,
+                                                       clock::time_point deadline)
+  {
+    return prepare(plan, stop, deadline);
+  }
   virtual std::unique_ptr<query_driver> prepare(std::string_view plan,
                                                 std::stop_token stop,
                                                 clock::time_point deadline) = 0;
@@ -60,6 +69,7 @@ enum class query_phase {
   CLOSED
 };
 struct query_state {
+  std::shared_ptr<input_registry> inputs;
   std::string plan;
   clock::time_point deadline;
   std::stop_source stop;
@@ -90,6 +100,11 @@ class engine_control {
   void stop();
   sirius_error close(std::chrono::milliseconds duration);
   sirius_engine_stats inspect();
+  void require_input_active(std::shared_ptr<query_state> const& q);
+  std::shared_ptr<native_input> register_input(std::shared_ptr<query_state> const& q,
+                                               uint64_t id,
+                                               const sirius_input_column* columns,
+                                               uint32_t count);
 
  private:
   void worker() noexcept;

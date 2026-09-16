@@ -52,6 +52,9 @@ class memory_space;
 namespace sirius {
 class like_multiliteral_cache;
 }  // namespace sirius
+namespace sirius::embedding {
+struct capacity_waker;
+}
 
 namespace sirius::pipeline {
 class completion_handler;
@@ -95,6 +98,14 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
   using metadata_scan_task_t = std::function<std::unique_ptr<scan_info>(std::stop_token)>;
 
   virtual ~gpu_ingestible() = default;
+  // Live query inputs have no finite metadata enumerator and never block a
+  // task-creator worker waiting for their producer. File sources keep defaults.
+  virtual bool is_live() const noexcept { return false; }
+  virtual bool live_ready() const { return false; }
+  virtual bool live_exhausted() const { return false; }
+  virtual std::unique_ptr<op::operator_data> live_claim();
+  virtual void live_subscribe(std::shared_ptr<embedding::capacity_waker>) {}
+  virtual void live_stop() {}
 
   gpu_ingestible(gpu_ingestible const&)            = delete;
   gpu_ingestible& operator=(gpu_ingestible const&) = delete;

@@ -2,12 +2,22 @@
 # consumer below separately proves the real static dependency/link boundary.
 add_executable(sirius_native_control_unittest
   test/cpp/exec/execution_evidence_unittest.cpp
-  test/cpp/embedding/test_native_control.cpp src/embedding/control.cpp)
+  test/cpp/embedding/test_native_control.cpp test/cpp/embedding/test_native_input.cpp
+  src/embedding/control.cpp src/embedding/input.cpp)
 target_compile_features(sirius_native_control_unittest PRIVATE cxx_std_20)
 target_include_directories(sirius_native_control_unittest PRIVATE
   "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(sirius_native_control_unittest PRIVATE Threads::Threads)
 add_executable(sirius_c_smoke test/cpp/embedding/c_smoke.c)
+add_executable(sirius_native_gpu_unittest
+  test/cpp/exec/execution_evidence_unittest.cpp test/cpp/embedding/test_native_gpu.cpp
+  src/embedding/c_api.cpp)
+target_compile_features(sirius_native_gpu_unittest PRIVATE cxx_std_20)
+target_include_directories(sirius_native_gpu_unittest PRIVATE
+  "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch" "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/include")
+target_compile_definitions(sirius_native_gpu_unittest PRIVATE SIRIUS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(sirius_native_gpu_unittest PRIVATE sirius_core duckdb_static dummy_static_extension_loader Threads::Threads)
 set_target_properties(sirius_c_smoke PROPERTIES C_STANDARD 99 LINKER_LANGUAGE CXX)
 target_link_libraries(sirius_c_smoke PRIVATE Sirius::embed)
 set_property(TARGET sirius_c_smoke APPEND PROPERTY LINK_DEPENDS
