@@ -19,6 +19,7 @@
 #include "exec/leased_callable.hpp"
 #include "log/logging.hpp"
 #include "memory/topology_index.hpp"
+#include "op/scan/sirius_gpu_scan_operator.hpp"
 #include "op/scan/sirius_gpu_scan_operator_data.hpp"
 #include "op/sirius_physical_delim_join.hpp"
 #include "pipeline/gpu_pipeline_task.hpp"
@@ -267,6 +268,8 @@ task_creator::compute_pipeline_priorities(const sirius::planner::query& query) c
 
 void task_creator::discard_pending_tasks(sirius::query_id_t query_id)
 {
+  if (auto state = get_query_task_global_state(query_id))
+    for (auto const& [node, wake] : state->live_wakes) wake->close();
   // Queue disposal is not a lifetime barrier. The owner has settled publication and will
   // wait for leases, including requests already held by the manager or a worker.
   _task_creation_queue.drain(
@@ -433,6 +436,14 @@ void task_creator::reschedule(std::unique_ptr<parallel::itask> task)
 void task_creator::schedule(op::sirius_physical_operator* node)
 {
   const auto [query_id, priority] = request_keys_for(node);
+  if (node && node->type == op::SiriusPhysicalOperatorType::GPU_SCAN) {
+    if (auto state = get_query_task_global_state(query_id)) {
+      if (auto it = state->live_wakes.find(node); it != state->live_wakes.end()) {
+        it->second->wake();
+        return;
+      }
+    }
+  }
   // Callers still own the plan while extracting keys above. Register this publisher through
   // push(), so cleanup cannot drain between checking the gate and inserting the request.
   auto submission = begin_submission(query_id);
@@ -448,6 +459,14 @@ void task_creator::schedule(op::sirius_physical_operator* node)
 
 void task_creator::schedule(op::sirius_physical_operator* node, sirius::query_id_t query_id)
 {
+  if (node && node->type == op::SiriusPhysicalOperatorType::GPU_SCAN) {
+    if (auto state = get_query_task_global_state(query_id)) {
+      if (auto it = state->live_wakes.find(node); it != state->live_wakes.end()) {
+        it->second->wake();
+        return;
+      }
+    }
+  }
   auto submission = begin_submission(query_id);
   if (!submission) { return; }
   const auto [_, priority] = request_keys_for(node);
@@ -567,6 +586,11 @@ void task_creator::schedule_lookahead(std::optional<int> device_id_hint)
         continue;
       }
       if (hint.value().hint == op::TaskCreationHint::READY) {
+        if (auto it = state->live_wakes.find(node); it != state->live_wakes.end()) {
+          it->second->wake();
+          ++state->index_of_next_lookahead;
+          return;
+        }
         SIRIUS_LOG_TRACE("Task Creator: scheduling lookahead for operator {} (id {})",
                          node->get_name(),
                          node->get_operator_id());
@@ -651,6 +675,7 @@ void task_creator::manager_loop()
                    ? op->get_operator_id()
                    : op::sirius_physical_operator::invalid_operator_id;
         };
+        if (request->live_wake) request->live_wake->complete();
         _query_event_publisher->publish_failed_to_create_task(
           query_id, id_of(requested_node), id_of(next.op != nullptr ? next.op : requested_node));
         continue;
@@ -680,6 +705,10 @@ void task_creator::manager_loop()
          request_kind,
          query_id,
          query_state = std::move(query_state)]() mutable {
+          struct wake_guard {
+            std::shared_ptr<embedding::source_wakeup> wake;
+            ~wake_guard() { if (wake) wake->complete(); }
+          } wake_done{std::move(request->live_wake)};
           // Scoped marker so task_creator::stop() can assert it is never called from here.
           struct worker_marker {
             worker_marker() { t_in_creation_worker = true; }
@@ -887,5 +916,41 @@ void task_creator::manager_loop()
 }
 
 uint64_t task_creator::get_next_task_id() { return _task_id.fetch_add(1); }
+
+void task_creator::arm_live_inputs(const planner::query& query)
+{
+  auto state = get_query_task_global_state(query.query_id());
+  if (!state) throw std::runtime_error("live scan query state is missing");
+  // Populate the entire immutable map before publishing any callback.
+  for (auto* node : query.get_scan_operators()) {
+    if (node->type != op::SiriusPhysicalOperatorType::GPU_SCAN) continue;
+    auto& scan = node->Cast<op::scan::sirius_gpu_scan_operator>();
+    if (!scan.get_ingestible().is_live()) continue;
+    auto [id, priority]                         = request_keys_for(node);
+    std::weak_ptr<query_task_global_state> weak = state;
+    auto wake                                   = std::make_shared<embedding::source_wakeup>(
+      [this, weak, node, id, priority] {
+        auto generation = weak.lock();
+        if (!generation) return;
+        auto submission = begin_submission(id);
+        if (!submission) return;
+        auto request       = std::make_unique<task_creation_request>();
+        request->node      = node;
+        request->query_id  = id;
+        request->priority  = priority;
+        request->live_wake = generation->live_wakes.at(node);
+        request->operator_type = node->type;
+        request->work = submission.take_work_lease();
+        if (!_task_creation_queue.push(std::move(request)))
+          throw std::runtime_error("live input scheduling queue is stopped");
+      },
+      [weak](std::exception_ptr error) {
+        if (auto generation = weak.lock()) generation->completion_handler->report_error(error);
+      });
+    state->live_wakes.emplace(node, std::move(wake));
+  }
+  for (auto const& [node, wake] : state->live_wakes)
+    node->Cast<op::scan::sirius_gpu_scan_operator>().get_ingestible().live_subscribe(wake);
+}
 
 }  // namespace sirius::creator

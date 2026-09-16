@@ -406,6 +406,8 @@ void sirius_pipeline::update_pipeline_status(bool original_pipeline)
         if (tasks_created.load() == tasks_completed.load()) {
           pipeline_finished.store(true);
           just_closed = true;
+          if (source && source->type == op::SiriusPhysicalOperatorType::GPU_SCAN)
+            source->finalize_operator();
           for (auto& op : get_operators()) {
             op.get().finalize_operator();
           }

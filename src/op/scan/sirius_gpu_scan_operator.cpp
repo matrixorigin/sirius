@@ -394,14 +394,23 @@ sirius_gpu_scan_operator::~sirius_gpu_scan_operator() = default;
 //===----------------------------------------------------------------------===//
 std::optional<task_creation_hint> sirius_gpu_scan_operator::get_next_task_hint()
 {
+  if (_ingestible && _ingestible->is_live()) {
+    if (_ingestible->live_exhausted() || !_ingestible->live_ready()) return std::nullopt;
+    return task_creation_hint{TaskCreationHint::READY, this};
+  }
   if (_split_connector->is_closed()) { return std::nullopt; }
   return task_creation_hint{TaskCreationHint::READY, this};
 }
 
-bool sirius_gpu_scan_operator::all_ports_empty() { return _split_connector->is_closed(); }
+bool sirius_gpu_scan_operator::all_ports_empty()
+{
+  return _ingestible && _ingestible->is_live() ? _ingestible->live_exhausted()
+                                               : _split_connector->is_closed();
+}
 
 std::optional<std::size_t> sirius_gpu_scan_operator::total_source_input_bytes() const
 {
+  if (_ingestible && _ingestible->is_live()) return std::nullopt;
   if (!_split_connector->is_discovery_complete()) { return std::nullopt; }
   // An unsized split may still emit rows, so discovered bytes are not a total.
   if (_split_connector->has_unsized_splits()) { return std::nullopt; }
@@ -422,6 +431,7 @@ std::optional<std::size_t> sirius_gpu_scan_operator::total_source_output_bytes()
 
 std::unique_ptr<op::operator_data> sirius_gpu_scan_operator::get_next_task_input_data()
 {
+  if (_ingestible && _ingestible->is_live()) return _ingestible->live_claim();
   auto next = _split_connector->get_next_split();
   if (!next.has_value()) { return nullptr; }
   if (auto* scan_input = dynamic_cast<scan_operator_input*>(next->get()); scan_input) {

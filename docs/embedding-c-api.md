@@ -1,8 +1,8 @@
 # Native embedding C API
 
 Tracking: [MatrixOne #28966](https://github.com/matrixorigin/matrixone/issues/28966).
-This is migration stage 3's control/library foundation. Stages 4-6 add the
-bounded MO input, admitted TAE bindings, and native result adapters. The public
+Stages 3 and 4 provide the control/library foundation and bounded MO input.
+Stages 5-6 add admitted Substrait/TAE bindings and native result adapters. The public
 capability mask currently advertises **ENGINE_CONTROL only**. Query preparation
 returns `SIRIUS_UNSUPPORTED`; this is not a working native SQL data path and must
 not be substituted for Flight yet. Numeric compatibility is separately tracked
@@ -89,15 +89,97 @@ dequeueing a lease and returns only on final release. Leases keep their accounti
 state alive after the facade closes. Closing wakes blocked acquisition and
 removes scheduling callbacks; callbacks run outside the accounting lock.
 
-This primitive is not yet a MO input queue or result sink. Those consumers must
-carry its leases through actual asynchronous GPU use before enabling their
-capability bits.
+Native input carries these leases through filling, publication, source claims
+and asynchronous GPU conversion/retry. The native result sink is still pending.
+
+## Bounded native MO input (stage 4)
+
+The C input operations are additive to ABI version 1; no Flight protocol changes
+or new runtime configuration are required. Production preparation deliberately
+remains unsupported until stage 5 implements strict plan/binding admission.
+The private integration-test backend exercises the production C entry points,
+pooled source and real GPU scheduler; it is not linked into `Sirius::embed`.
+
+### Producer contract
+
+1. Register at most 16 query-local binding IDs while the query is CREATED.
+   Registration copies at most 1024 column descriptors per input. Registration
+   freezes when preparation is queued; duplicate IDs are rejected.
+2. After successful preparation, acquire a C-owned batch lease. Queued or
+   preparing queries cannot allocate input buffers. Acquire observes both the
+   caller wait timeout and query cancellation/deadline.
+3. Write MO value bytes, varlena areas and raw null words with synchronous bulk
+   copies. The implementation does not retain the source pointer. Neither
+   Flight frames nor serialized TAE vector headers are used.
+4. Publish row count and column offsets/lengths. Success consumes the batch
+   handle; failure leaves it with the caller for correction or release.
+   Published bytes are immutable. Zero rows do not mean EOS.
+5. Finish explicitly after publishing/releasing filling batches. Finish is
+   idempotent; outstanding filling leases return BUSY. Producer failure cancels
+   the query and preserves the error instead of reporting EOF. Closing an
+   unfinished producer cancels the query, rather than inventing successful EOS.
+
+Query close cancels and joins execution, then returns BUSY while input handles
+or caller-owned batch leases remain. Closing/releasing those handles permits
+retrying query close. Cancellation never frees a buffer while its producer can
+still write it. Early source abandonment returns NOT_NEEDED. Other failures
+preserve their error category across blocked acquisition and query wait.
+
+### Bounds and memory ownership
+
+Each read has a 64 MiB byte window and at most 128 batch leases. Charges include
+physical pinned-pool block rounding and retained batch descriptors, so the
+maximum payload is slightly smaller than 64 MiB. Bitmap/area bytes live inside
+the charged payload. Metadata also has explicit read/column/descriptor bounds.
+
+Activation reserves every read's full window from the configured host pool
+before enabling producers; insufficient aggregate host capacity fails admission.
+Allocations draw on those reservations, not additional unreserved pinned memory.
+Unused reservations are released during quiescent cleanup; filling/retry owners
+keep their pool reservation alive until their own final release.
+
+The consumer coalesces available batches toward 32 MiB, with at most 128 batch
+slices and 64 MiB expanded data per source unit. Expanded-source credits also
+bound the total outstanding units of a read to 64 MiB / 128 units. Planning
+includes validity padding and string offsets. Constant and variable-width
+expansion is bounded; oversized units split lazily at row boundaries, and an
+unrepresentable single row fails. Producer payloads must already be bounded.
+
+Dequeuing does not release input credit. The scan split retains immutable
+native bytes until conversion and any source retry are safe. Successful decode
+synchronizes the task stream before releasing host ownership; later pipeline
+retries retain decoded GPU data under the existing query memory manager.
+Failed quiescence retains unsafe owners and returns GPU_UNAVAILABLE.
+
+### Live scan scheduling and types
+
+Native ingestion uses the unified GPU scan operator, but bypasses finite file
+metadata enumeration and cross-query pinned caches. Empty-open input parks
+scheduling without blocking a task-creator/GPU worker. A durable, deduplicated
+wakeup covers publication, EOS, error and returned source credit. Subscriptions
+use weak query generations and close before queued/in-flight plan references
+are drained. File-backed scans retain their existing behavior.
+
+Layouts use little-endian MO scalar values, 24-byte varlena and raw 64-bit null
+words (1 means NULL; omitted trailing words mean non-NULL). Supported OIDs are
+BOOL, signed/unsigned integers through 64 bits, FLOAT32/64, DATE, DATETIME,
+DECIMAL64/128, CHAR/VARCHAR/TEXT/BLOB. Other OIDs, including Decimal256, return
+UNSUPPORTED; no decimal-to-float narrowing is introduced. Flat, constant and
+constant-NULL vectors are supported. NULL varlena garbage is never dereferenced.
+
+The future MO adapter must acquire native capacity before allocation/copy and
+keep its reader-to-publisher edge bounded. These Sirius tests prove the native
+back-pressure boundary; actual MO reader restraint is a stage-8 acceptance test.
 
 ## Validation
 
 ```sh
 pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
   '[native_control],[native_credit]'
+pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
+  '[native_input]'
+pixi run build/upstream-dev-merge/extension/sirius/sirius_native_gpu_unittest \
+  '[native_gpu]'
 pixi run build/upstream-dev-merge/extension/sirius/sirius_c_smoke \
   test/cpp/scan/memory.yaml
 pixi run build/upstream-dev-merge/extension/sirius/test/cpp/sirius_unittest \

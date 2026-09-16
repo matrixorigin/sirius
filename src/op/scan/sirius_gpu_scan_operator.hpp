@@ -108,6 +108,10 @@ class sirius_gpu_scan_operator : public sirius_physical_operator {
   // Source interface
   // -----------------------------
   bool is_source() const override { return true; }
+  void on_finalize_operator() override
+  {
+    if (_ingestible && _ingestible->is_live()) _ingestible->live_stop();
+  }
 
   std::optional<task_creation_hint> get_next_task_hint() override;
   [[nodiscard]] bool all_ports_empty() override;

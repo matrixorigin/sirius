@@ -15,10 +15,10 @@
  */
 
 #pragma once
-
 #include "config.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "event/query_event_publisher.hpp"
+#include "embedding/source_wakeup.hpp"
 #include "exec/bounded_thread_pool.hpp"
 #include "exec/config.hpp"
 #include "exec/interruptible_mpmc.hpp"
@@ -64,6 +64,7 @@ class itask;
 }
 
 namespace sirius::creator {
+// Live inputs retain only a weak query generation in their scheduler callback.
 
 /**
  * @brief Manages the creation and scheduling of GPU pipeline tasks.
@@ -83,6 +84,7 @@ namespace sirius::creator {
 struct task_creation_request {
   // Lives from publication through the final creator callback, including the pop/attach gap.
   exec::query_lifecycle_registry::work_lease work;
+  std::shared_ptr<sirius::embedding::source_wakeup> live_wake;
   op::sirius_physical_operator* node;
   request_type type = request_type::active;
   //! The query `node` belongs to. Indexes the request in the creation queue so a finished or
@@ -113,6 +115,7 @@ struct next_task_result {
 
 class task_creator {
  public:
+  void arm_live_inputs(const planner::query& query);
   /**
    * @brief Construct a new task_creator.
    *
@@ -360,6 +363,9 @@ class task_creator {
    * entry; keying it globally is what would let two queries fetch each other's state.
    */
   struct query_task_global_state {
+    std::unordered_map<op::sirius_physical_operator*,
+                       std::shared_ptr<sirius::embedding::source_wakeup>>
+      live_wakes;
     //! Source operator id -> that pipeline's task global state. Written once by
     //! prepare_for_query, read-only afterwards.
     std::unordered_map<size_t, std::shared_ptr<pipeline::sirius_pipeline_task_global_state>>
