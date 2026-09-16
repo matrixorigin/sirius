@@ -31,6 +31,7 @@
 #include "op/sirius_physical_operator_type.hpp"
 #include "op/sirius_physical_partition.hpp"
 #include "op/sirius_physical_result_collector.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "pipeline/repository_wiring.hpp"
 #include "pipeline/sirius_pipeline_converter.hpp"
 #include "pipeline/sirius_plan_printer.hpp"
@@ -293,16 +294,28 @@ void sirius_engine::execute()
                                   duckdb::SiriusContext::query_retirement_mode::completed);
     finish_deferred_preparation(query_.get());
     plan_users_quiescent_ = true;
+    if (auto fatal = completion_handler_->fatal_error()) {
+      sirius_ctx->mark_runtime_unavailable();
+      std::rethrow_exception(fatal);
+    }
   } catch (const std::exception& e) {
     SIRIUS_LOG_ERROR("Error executing query: {}", e.what());
     cancel_dynamic_filter_publications();
     // Retire asynchronous borrowers before the execution window can release repositories.
     quiesce_plan_users();
+    if (auto fatal = completion_handler_->fatal_error()) {
+      sirius_ctx->mark_runtime_unavailable();
+      std::rethrow_exception(fatal);
+    }
     throw;
   } catch (...) {
     SIRIUS_LOG_ERROR("Unknown error executing query");
     cancel_dynamic_filter_publications();
     quiesce_plan_users();
+    if (auto fatal = completion_handler_->fatal_error()) {
+      sirius_ctx->mark_runtime_unavailable();
+      std::rethrow_exception(fatal);
+    }
     throw;
   }
 

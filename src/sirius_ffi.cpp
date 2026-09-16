@@ -169,7 +169,12 @@ struct Context::Impl {
     context->initialize(config);
 
     // Substrait lowering uses core functions and resolves local_files reads to parquet_scan.
-    db = duckdb::make_uniq<duckdb::DuckDB>(nullptr);
+    // This context already owns an initialized Sirius runtime. Loading the
+    // generated extension list would construct a second runtime and mutate
+    // process-wide allocators/configuration behind the embedding owner.
+    duckdb::DBConfig duckdb_config;
+    duckdb_config.options.load_extensions = false;
+    db = duckdb::make_uniq<duckdb::DuckDB>(nullptr, &duckdb_config);
     db->LoadStaticExtension<duckdb::CoreFunctionsExtension>();
     db->LoadStaticExtension<duckdb::ParquetExtension>();
     // Cache parquet footers across binds. The Substrait consumer builds the plan through the
@@ -227,6 +232,15 @@ Context::Context(const std::string& config_path) : impl_(std::make_unique<Impl>(
 // Defined here, where the heavy types are complete: destroying `impl_` tears down
 // the embedded DuckDB and the initialized engine.
 Context::~Context() = default;
+
+Context::Context(const std::string& config_path, uint32_t gpu_pipeline_threads)
+  : impl_(std::make_unique<Impl>())
+{
+  sirius::sirius_config config;
+  config.load_from_file(config_path);
+  config.set_gpu_pipeline_executor_threads(gpu_pipeline_threads);
+  impl_->bring_up(config);
+}
 
 void Context::execute_substrait(const std::string& plan, std::uintptr_t out_stream_addr)
 {

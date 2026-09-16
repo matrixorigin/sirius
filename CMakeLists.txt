@@ -53,6 +53,7 @@ include(cmake/sirius-substrait.cmake)
 
 include(cmake/sirius-targets.cmake)
 include(cmake/sirius-tae.cmake)
+include(cmake/sirius-embedding.cmake)
 
 include(cmake/sirius-install.cmake)
 
@@ -70,4 +71,5 @@ endif()
 if(SIRIUS_BUILD_TESTS)
   include(cmake/sirius-test-sources.cmake)
   include(cmake/sirius-tests.cmake)
+  include(cmake/sirius-embedding-tests.cmake)
 endif()
