@@ -443,8 +443,9 @@ void gpu_pipeline_executor::process_task(
           quarantine_poisoned_stream(std::move(exc_stream));
           SIRIUS_LOG_ERROR("GPU Pipeline Executor: fatal stream quiescence failure: {}",
                            fatal.what());
-          if (_task_creator) { _task_creator->stop(); }
-          if (completion) { completion->report_error(std::current_exception()); }
+          // Pool shutdown belongs to the query coordinator, never to a GPU
+          // worker that shutdown itself may need to join.
+          if (completion) { completion->report_fatal_error(std::current_exception()); }
           return;
         } catch (task_reschedule_exception& ex) {
           // Only THIS query's error state suppresses the reschedule. Previously one query's

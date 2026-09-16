@@ -1048,6 +1048,14 @@ const exec::thread_pool_config& sirius_config::get_gpu_pipeline_executor_config(
   return _gpu_pipeline_executor_config;
 }
 
+void sirius_config::set_gpu_pipeline_executor_threads(uint32_t threads)
+{
+  if (threads == 0 || threads > 128) {
+    throw std::invalid_argument("GPU pipeline worker count must be between 1 and 128");
+  }
+  _gpu_pipeline_executor_config.num_threads = static_cast<int>(threads);
+}
+
 const exec::downgrade_executor_config& sirius_config::get_downgrade_executor_config() const noexcept
 {
   return _downgrade_executor_config;
