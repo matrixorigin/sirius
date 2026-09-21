@@ -60,6 +60,13 @@ and charges copied plans, contracts, read schemas, manifests, and a conservative
 allowance for parsed TAE metadata before retaining them. The adjacent
 `tae_host_staging_bytes` setting defaults to 64 MiB for the later payload pump.
 
+Embedded TAE mode and its staging budget are owned by a Sirius binding carrier.
+The scanner parser returns storage metadata only. Binding copies retain the
+query context, and physical planning transfers it to the TAE ingestible.
+Optional `sort_column` metadata never selects execution mode: embedded reads
+use block-sized work with or without a sort key, while standalone `tae_scan`
+keeps its object-sized work.
+
 The coordinator initializes and destroys the runtime, and performs preparation,
 execution and query teardown, on one native thread. Foreign callers never own
 DuckDB's thread-affine execution-window mutex. Stop-token cancellation bypasses

@@ -408,10 +408,9 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
             throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
                                      "TAE manifest column binding mismatch");
         }
-        tae_bind->embedded_host_budget = tae_host_budget;
-        binding.tae_host_budget        = tae_host_budget;
-        binding.tae                    = std::move(tae_bind);
-        function                       = embedding::embedded_tae_function;
+        binding.tae_host_budget = tae_host_budget;
+        binding.tae             = std::move(tae_bind);
+        function                = embedding::embedded_tae_function;
       }
       impl_->embedded_catalog->declare(read.binding_id, std::move(binding));
       auto view_name = embedded_view_name(generation, read.binding_id);
