@@ -104,6 +104,8 @@ class channel {
    */
   T try_get() { return _queue->try_pop(); }
 
+  T get_for(std::int64_t microseconds) { return _queue->pop_for(microseconds); }
+
   /**
    * @brief Close the channel.
    *

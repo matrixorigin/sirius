@@ -103,6 +103,8 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
   // task-creator worker waiting for their producer. File sources keep defaults.
   virtual bool is_live() const noexcept { return false; }
   virtual bool live_ready() const { return false; }
+  virtual void live_request() {}
+  virtual void live_set_io_resolver(io::ioctx_resolver) {}
   virtual bool live_exhausted() const { return false; }
   virtual std::unique_ptr<op::operator_data> live_claim();
   virtual void live_subscribe(std::shared_ptr<embedding::capacity_waker>) {}

@@ -124,6 +124,10 @@ class gpu_pipeline_executor : public sirius::parallel::itask_executor {
    */
   [[nodiscard]] executor_metrics get_metrics() const noexcept;
 
+  /// Non-blocking full converter admission, called before removal from the scheduler queue.
+  /// False keeps the task visible to downgrade and permits downstream tasks to bypass it.
+  bool try_admit(gpu_pipeline_task& task);
+
   /**
    * @brief Return the effective executor configuration after scheduler derivation.
    */
@@ -175,6 +179,7 @@ class gpu_pipeline_executor : public sirius::parallel::itask_executor {
     std::make_shared<sirius::event::query_event_publisher>()};
   sirius::creator::task_creator* _task_creator{nullptr};
   std::atomic<size_t> _tasks_executed{0};
+  std::future<size_t> _admission_downgrade;
 };
 
 }  // namespace pipeline

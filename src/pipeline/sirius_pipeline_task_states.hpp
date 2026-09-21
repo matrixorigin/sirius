@@ -51,6 +51,7 @@ struct reservation_size_info {
   std::size_t retry_reservation_floor = 0;      ///< OOM-derived lower bound
   std::size_t reservation_size        = 0;      ///< max(normal estimate, retry floor)
   bool had_history                    = false;  ///< Estimate used pipeline history
+  std::size_t mandatory_gpu_bytes     = 0;      ///< Required input peak; partial grants forbidden
 };
 
 /**

@@ -6,11 +6,14 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/cudf_utils.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <cucascade/cudf/gpu_data_representation.hpp>
+#include <data/host_tae_representation_converters.hpp>
 #include <data/sirius_converter_registry.hpp>
 #include <embedding/control.hpp>
+#include <embedding/tae_read.hpp>
 #include <expression/ast/from_duckdb.hpp>
 #include <expression_evaluator/expression_evaluator.hpp>
 #include <io/sirius_datasource.hpp>
@@ -18,10 +21,12 @@
 #include <lz4.h>
 #include <op/scan/owning_table_view.hpp>
 #include <op/scan/scan_utils.hpp>
+#include <op/scan/sirius_gpu_scan_operator_data.hpp>
 #include <op/scan/tae_gpu_ingestible.hpp>
 #include <tae/tae_format.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -32,6 +37,145 @@
 
 namespace sirius::op::scan {
 namespace {
+
+using embedding::failure;
+
+std::size_t checked_add(std::size_t a, std::size_t b)
+{
+  if (b > std::numeric_limits<std::size_t>::max() - a)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE descriptor size overflow");
+  return a + b;
+}
+
+struct embedded_object_metadata {
+  tae::ObjectMeta object;
+  bool crc{false};
+  std::size_t rows{0};
+};
+
+template <typename T>
+T metadata_value(std::span<const std::uint8_t> bytes, std::size_t offset)
+{
+  if (offset > bytes.size() || sizeof(T) > bytes.size() - offset)
+    throw std::runtime_error("TAE metadata field is truncated");
+  T value;
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+
+// Validate counts and additions before the general parser allocates vectors.
+// In particular block_count * BI_POS_LEN must not wrap uint32_t.
+void validate_embedded_metadata(std::span<const std::uint8_t> bytes)
+{
+  if (bytes.size() < tae::META_V3_HEADER_LEN)
+    throw std::runtime_error("TAE metadata header is truncated");
+  if (metadata_value<std::uint16_t>(bytes, tae::MV3_DATA_COUNT_OFF) == 0) return;
+  auto const data_offset = metadata_value<std::uint32_t>(bytes, tae::MV3_DATA_OFFSET_OFF);
+  if (data_offset > bytes.size()) throw std::runtime_error("TAE metadata offset is invalid");
+  auto const data         = bytes.subspan(data_offset);
+  auto const columns      = metadata_value<std::uint16_t>(data, tae::BH_META_COL_CNT_OFF);
+  auto const index_offset = tae::BLOCK_HEADER_SIZE + std::size_t(columns) * tae::COL_META_LEN;
+  auto const blocks       = metadata_value<std::uint32_t>(data, index_offset);
+  auto const index_begin  = index_offset + tae::BI_BLOCK_COUNT_LEN;
+  if (blocks > (data.size() - index_begin) / tae::BI_POS_LEN)
+    throw std::runtime_error("TAE metadata block index is invalid");
+  // Include a second copy's worth for allocator rounding / vector owners.
+  auto parsed_bytes =
+    checked_add(sizeof(tae::ObjectMeta), 2 * std::size_t(blocks) * sizeof(tae::BlockInfo));
+  if (parsed_bytes > embedding::tae_metadata_blob_limit)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE parsed metadata exceeds 8 MiB");
+  for (std::size_t i = 0; i < blocks; ++i) {
+    auto const offset = metadata_value<std::uint32_t>(data, index_begin + i * tae::BI_POS_LEN);
+    auto const length = metadata_value<std::uint32_t>(data, index_begin + i * tae::BI_POS_LEN + 4);
+    if (offset > data.size() || length > data.size() - offset || length < tae::BLOCK_HEADER_SIZE)
+      throw std::runtime_error("TAE metadata block is truncated");
+    auto const block = data.subspan(offset, length);
+    auto const count = metadata_value<std::uint16_t>(block, tae::BH_META_COL_CNT_OFF);
+    if (count > (length - tae::BLOCK_HEADER_SIZE) / tae::COL_META_LEN)
+      throw std::runtime_error("TAE metadata columns are truncated");
+    // Block offsets need not be disjoint in hostile input. Charge the full
+    // repeated expansion BEFORE ParseMetadata resizes any block/column vector.
+    parsed_bytes = checked_add(parsed_bytes, 2 * std::size_t(count) * sizeof(tae::ColumnMetaInfo));
+    if (parsed_bytes > embedding::tae_metadata_blob_limit)
+      throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE parsed metadata exceeds 8 MiB");
+  }
+}
+
+std::vector<std::uint8_t> bounded_metadata_read(io::sirius_datasource& source,
+                                                bool crc,
+                                                std::uint64_t offset,
+                                                std::size_t length,
+                                                std::stop_token stop)
+{
+  // At most two 8 MiB serialized buffers plus parsed metadata coexist on the
+  // single metadata worker, independently of the 32 MiB immutable LRU.
+  if (length > embedding::tae_metadata_blob_limit)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE object metadata exceeds 8 MiB");
+  std::vector<std::uint8_t> bytes(length);
+  if (stop.stop_requested()) throw failure(SIRIUS_CANCELLED, "TAE metadata scan stopped");
+  if (!crc) {
+    if (offset > source.size() || length > source.size() - offset ||
+        source.host_read(offset, length, bytes.data()) != length)
+      throw std::runtime_error("short TAE metadata read");
+    return bytes;
+  }
+  std::array<std::uint8_t, 64u << 10> scratch;
+  embedding::tae_read_at read = [&](auto off, auto count, auto* destination) {
+    return source.host_read(off, count, destination);
+  };
+  std::size_t done = 0;
+  while (done < length) {
+    if (stop.stop_requested()) throw failure(SIRIUS_CANCELLED, "TAE metadata scan stopped");
+    auto const n =
+      embedding::read_tae_slice(read, source.size(), crc, offset + done, length - done, scratch);
+    std::memcpy(bytes.data() + done, scratch.data(), n);
+    done += n;
+  }
+  return bytes;
+}
+
+void upload_embedded_payload(tae_scan_info const& info,
+                             void* device,
+                             std::size_t bytes,
+                             rmm::cuda_stream_view stream)
+{
+  if (!info.work_permit ||
+      info.admitted_bytes.load(std::memory_order_acquire) < info.gpu_peak_bytes ||
+      !info.gpu_peak_bytes || bytes != info.compressed_bytes)
+    throw failure(SIRIUS_INVALID_STATE, "TAE payload I/O requires full GPU admission");
+  if (info.stop.stop_requested()) throw failure(SIRIUS_CANCELLED, "TAE scan stopped");
+  if (!info.staging) {
+    info.staging = std::make_shared<pinned_host_buffer>(info.work_permit->staging_bytes(), true);
+    info.work_permit->retain_staging(info.staging);
+  }
+  // Each attempt owns its datasource; mutable prefetch handles are never shared
+  // between work units or cached as part of immutable object metadata.
+  auto source = info.io_context->open_datasource(info.object_path, info.object_size);
+  embedding::tae_read_at read = [&](auto off, auto count, auto* destination) {
+    return source->host_read(off, count, destination);
+  };
+  for (auto const& chunk : info.chunks) {
+    std::size_t done = 0;
+    while (done < chunk.pinned_length) {
+      if (info.stop.stop_requested()) throw failure(SIRIUS_CANCELLED, "TAE scan stopped");
+      auto const n = embedding::read_tae_slice(read,
+                                               source->size(),
+                                               info.crc_wrapped,
+                                               std::uint64_t(chunk.extent.offset) + done,
+                                               chunk.pinned_length - done,
+                                               {info.staging->data(), info.staging->size()});
+      CUDF_CUDA_TRY(cudaMemcpyAsync(static_cast<std::uint8_t*>(device) + chunk.pinned_offset + done,
+                                    info.staging->data(),
+                                    n,
+                                    cudaMemcpyHostToDevice,
+                                    stream.value()));
+      // Reuse only after this DMA has retired. On a CUDA failure the descriptor
+      // keeps the allocation/permit alive for task-level quiescence/quarantine.
+      stream.synchronize();
+      done += n;
+    }
+  }
+}
 
 class passthrough_coalescer final : public batch_coalescer {
  public:
@@ -226,7 +370,9 @@ std::vector<std::optional<std::size_t>> to_batch_positions(
 void tae_ingestible_table_info::refresh_object_paths()
 {
   object_paths_.clear();
-  if (!bind_data) { return; }
+  // Live sources do not participate in scan-manager cache matching. Expanding
+  // a long common root into every manifest path would multiply host metadata.
+  if (!bind_data || embedded_manifest) { return; }
   object_paths_.reserve(bind_data->objects.size());
   for (auto const& object : bind_data->objects) {
     object_paths_.push_back(bind_data->data_dir + "/" + object.file_path);
@@ -239,6 +385,8 @@ tae_gpu_ingestible::tae_gpu_ingestible(std::unique_ptr<tae_ingestible_table_info
   if (!_info || !_info->bind_data || _info->context == nullptr) {
     throw std::invalid_argument("TAE ingestible requires bind data and a client context");
   }
+  if (_info->embedded_manifest && !_info->embedded_controller)
+    throw failure(SIRIUS_INVALID_STATE, "embedded TAE requires a shared demand controller");
   _info->refresh_object_paths();
   _plan = build_tae_scan_plan(*_info->bind_data,
                               _info->column_ids,
@@ -256,7 +404,270 @@ tae_gpu_ingestible::tae_gpu_ingestible(std::unique_ptr<tae_ingestible_table_info
   }
 }
 
-tae_gpu_ingestible::~tae_gpu_ingestible() = default;
+tae_gpu_ingestible::~tae_gpu_ingestible() { stop_metadata_scan(); }
+
+void tae_scan_info::gpu_admitted(std::size_t bytes) const
+{
+  if (gpu_peak_bytes && bytes < gpu_peak_bytes)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE GPU reservation is below the required peak");
+  admitted_bytes.store(bytes, std::memory_order_release);
+}
+
+bool tae_gpu_ingestible::live_ready() const
+{
+  std::lock_guard lock(_work_mutex);
+  return !_metadata_stop.stop_requested() && (_ready || _live_error);
+}
+
+bool tae_gpu_ingestible::live_exhausted() const
+{
+  std::lock_guard lock(_work_mutex);
+  return _metadata_stop.stop_requested() || (_exhausted && !_ready && !_pending && !_live_error);
+}
+
+void tae_gpu_ingestible::live_subscribe(std::shared_ptr<embedding::capacity_waker> wake)
+{
+  bool notify = false;
+  {
+    std::lock_guard lock(_work_mutex);
+    _waker = wake;
+    notify = _ready || _live_error || _exhausted;
+  }
+  // Subscription alone does not activate a scan on a later join branch.
+  if (notify && wake) wake->wake();
+}
+
+void tae_gpu_ingestible::live_request()
+{
+  if (!is_live()) return;
+  {
+    std::lock_guard lock(_work_mutex);
+    if (_pending || _ready || _exhausted || _live_error || _metadata_stop.stop_requested()) return;
+    _demand_started = true;
+    _pending        = true;
+  }
+  try {
+    auto weak = weak_from_this();
+    if (_info->embedded_controller->request([weak](auto permit) noexcept {
+          if (auto source = weak.lock())
+            static_cast<tae_gpu_ingestible&>(*source).produce_live(std::move(permit));
+        }))
+      return;
+    throw failure(SIRIUS_CANCELLED, "TAE demand controller is closed");
+  } catch (...) {
+    std::shared_ptr<embedding::capacity_waker> wake;
+    {
+      std::lock_guard lock(_work_mutex);
+      _pending    = false;
+      _live_error = std::current_exception();
+      wake        = _waker;
+    }
+    if (wake) wake->wake();
+  }
+}
+
+void tae_gpu_ingestible::live_set_io_resolver(io::ioctx_resolver resolve)
+{
+  if (!resolve) throw failure(SIRIUS_INVALID_ARGUMENT, "TAE I/O resolver is empty");
+  std::lock_guard lock(_work_mutex);
+  if (_demand_started)
+    throw failure(SIRIUS_INVALID_STATE, "TAE I/O resolver cannot change after demand");
+  _info->embedded_resolve = std::move(resolve);
+}
+
+void tae_gpu_ingestible::live_stop()
+{
+  _metadata_stop.request_stop();
+  std::unique_ptr<tae_scan_info> discarded;
+  std::shared_ptr<embedding::capacity_waker> wake;
+  {
+    std::lock_guard lock(_work_mutex);
+    discarded = std::move(_ready);
+    wake      = std::move(_waker);
+  }
+  if (wake) wake->wake();
+}
+
+std::unique_ptr<op::operator_data> tae_gpu_ingestible::live_claim()
+{
+  std::unique_ptr<tae_scan_info> ready;
+  {
+    std::lock_guard lock(_work_mutex);
+    if (_metadata_stop.stop_requested()) return {};
+    if (_live_error) std::rethrow_exception(_live_error);
+    ready = std::move(_ready);
+  }
+  if (!ready) return {};
+  live_request();
+  return std::make_unique<scan_operator_input>(std::move(ready));
+}
+
+void tae_gpu_ingestible::produce_live(std::shared_ptr<embedding::tae_work_permit> permit) noexcept
+{
+  std::unique_ptr<tae_scan_info> split;
+  std::exception_ptr error;
+  try {
+    if (!permit) throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE staging entitlement unavailable");
+    if (!_info->embedded_resolve)
+      throw failure(SIRIUS_INVALID_STATE, "TAE I/O resolver is not installed");
+    if (!_metadata_stop.stop_requested()) split = plan_live_split(permit);
+  } catch (...) {
+    error = std::current_exception();
+  }
+  std::shared_ptr<embedding::capacity_waker> wake;
+  {
+    std::lock_guard lock(_work_mutex);
+    _pending = false;
+    if (!_metadata_stop.stop_requested()) {
+      _exhausted  = !split && !error;
+      _ready      = std::move(split);
+      _live_error = std::move(error);
+      wake        = _waker;
+    }
+  }
+  if (wake) wake->wake();
+}
+
+std::unique_ptr<tae_scan_info> tae_gpu_ingestible::plan_live_split(
+  std::shared_ptr<embedding::tae_work_permit> const& permit)
+{
+  // Cursors are touched only by this source's single outstanding metadata job.
+  while (_next_object < _info->bind_data->objects.size()) {
+    if (_metadata_stop.stop_requested()) return {};
+    auto const& object = _info->bind_data->objects[_next_object];
+    if (!object.sort_key_zm.empty() && !_plan.pushed_filters.empty() &&
+        _plan.sort_column_idx >= 0 &&
+        !tae::ZoneMapPassesFilters(_plan.pushed_filters,
+                                   object.sort_key_zm.data(),
+                                   static_cast<std::uint16_t>(_plan.sort_column_idx))) {
+      ++_next_object;
+      _next_block = 0;
+      continue;
+    }
+    if (_info->bind_data->data_dir.size() >= embedding::tae_path_limit ||
+        object.file_path.size() > embedding::tae_path_limit - _info->bind_data->data_dir.size() - 1)
+      throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE object path exceeds 4096 bytes");
+    auto const path = _info->bind_data->data_dir + "/" + object.file_path;
+    auto context    = _info->embedded_resolve(path);
+    if (!context) throw std::runtime_error("TAE demand source has no I/O backend");
+    auto const cache_key = path + ":" + std::to_string(object.size_bytes);
+    auto metadata        = std::static_pointer_cast<const embedded_object_metadata>(
+      _info->embedded_controller->cached_metadata(cache_key));
+    if (!metadata) {
+      auto source = context->open_datasource(path, object.size_bytes);
+      auto parsed = std::make_shared<embedded_object_metadata>();
+      parsed->crc = has_crc_wrapper(*source);
+      auto header = bounded_metadata_read(
+        *source, parsed->crc, 0, tae::HEADER_SIZE, _metadata_stop.get_token());
+      auto const extent = metadata_value<tae::Extent>(header, tae::HEADER_META_EXTENT_OFF);
+      if (extent.alg > 1 || extent.origin_size > embedding::tae_metadata_blob_limit)
+        throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE metadata encoding exceeds admission bounds");
+      auto bytes = bounded_metadata_read(
+        *source, parsed->crc, extent.offset, extent.length, _metadata_stop.get_token());
+      if (extent.is_compressed())
+        bytes = decompress_metadata_lz4(bytes.data(), extent.length, extent.origin_size);
+      if (bytes.size() < tae::IO_ENTRY_HEADER_LEN)
+        throw std::runtime_error("TAE metadata IO entry header is missing");
+      auto const contents = std::span<const std::uint8_t>(bytes).subspan(tae::IO_ENTRY_HEADER_LEN);
+      validate_embedded_metadata(contents);
+      tae::ParseMetadata(
+        contents.data(), static_cast<std::uint32_t>(contents.size()), parsed->object);
+      std::size_t metadata_bytes = sizeof(*parsed) + path.size() +
+                                   2 * parsed->object.blocks.capacity() * sizeof(tae::BlockInfo);
+      for (auto const& block : parsed->object.blocks) {
+        metadata_bytes =
+          checked_add(metadata_bytes, 2 * block.columns.capacity() * sizeof(tae::ColumnMetaInfo));
+        parsed->rows = checked_add(parsed->rows, block.rows);
+      }
+      _info->embedded_controller->cache_metadata(cache_key, parsed, metadata_bytes);
+      metadata = std::move(parsed);
+    }
+    if (metadata->object.block_count != object.blocks)
+      throw std::runtime_error("TAE manifest block count does not match object metadata");
+    if (metadata->rows != object.rows)
+      throw std::runtime_error("TAE manifest row count does not match object metadata");
+
+    auto split = std::make_unique<tae_scan_info>();
+    auto const chunk_limit =
+      permit->chunk_limit(sizeof(host_tae_representation::column_chunk_info));
+    if (_plan.projected_columns.size() > chunk_limit)
+      throw failure(SIRIUS_RESOURCE_EXHAUSTED,
+                    "TAE block projection exceeds work metadata entitlement");
+    split->chunks.reserve(chunk_limit);
+    split->work_permit = permit;
+    split->io_context  = std::move(context);
+    split->object_path = path;
+    split->object_size = object.size_bytes;
+    split->crc_wrapped = metadata->crc;
+    split->stop        = _metadata_stop.get_token();
+    while (_next_block < metadata->object.blocks.size()) {
+      if (_metadata_stop.stop_requested()) return {};
+      if (_plan.projected_columns.size() > chunk_limit - split->chunks.size()) break;
+      auto const& block = metadata->object.blocks[_next_block];
+      bool passes       = true;
+      for (auto const sequence : _plan.filter_seqnums) {
+        if (sequence >= block.columns.size())
+          throw std::runtime_error("TAE object is missing a filtered column sequence");
+        if (!tae::ZoneMapPassesFilters(
+              _plan.pushed_filters, block.columns[sequence].zone_map, sequence)) {
+          passes = false;
+          break;
+        }
+      }
+      if (!passes || !block.rows) {
+        ++_next_block;
+        continue;
+      }
+      std::size_t decoded_bytes = 0;
+      for (auto const& projected : _plan.projected_columns) {
+        if (projected.seqnum >= block.columns.size())
+          throw std::runtime_error("TAE object is missing a projected column sequence");
+        auto const& extent = block.columns[projected.seqnum].location;
+        if (extent.alg > 1 || !extent.length || (extent.is_compressed() && !extent.origin_size))
+          throw std::runtime_error("TAE column extent has an unsupported encoding");
+        decoded_bytes =
+          checked_add(decoded_bytes, extent.is_compressed() ? extent.origin_size : extent.length);
+      }
+      if (split->rows && (decoded_bytes > embedding::tae_target_decoded_bytes -
+                                            std::min(split->uncompressed_bytes,
+                                                     embedding::tae_target_decoded_bytes) ||
+                          block.rows >= std::numeric_limits<std::int32_t>::max() - split->rows))
+        break;
+      if (block.rows >= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
+        throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE block exceeds cuDF row capacity");
+      for (auto const& projected : _plan.projected_columns) {
+        auto const& column = block.columns[projected.seqnum];
+        if (column.null_cnt > block.rows)
+          throw std::runtime_error("TAE column null count exceeds block rows");
+        host_tae_representation::column_chunk_info chunk{};
+        chunk.column_idx        = projected.col_ids_position;
+        chunk.type_oid          = projected.type_oid;
+        chunk.width             = projected.width;
+        chunk.scale             = projected.scale;
+        chunk.extent            = column.location;
+        chunk.null_cnt          = column.null_cnt;
+        chunk.row_count         = block.rows;
+        chunk.pinned_offset     = split->compressed_bytes;
+        chunk.pinned_length     = column.location.length;
+        split->compressed_bytes = checked_add(split->compressed_bytes, chunk.pinned_length);
+        split->chunks.push_back(chunk);
+      }
+      split->rows               = checked_add(split->rows, block.rows);
+      split->uncompressed_bytes = checked_add(split->uncompressed_bytes, decoded_bytes);
+      ++_next_block;
+      if (split->uncompressed_bytes >= embedding::tae_target_decoded_bytes) break;
+    }
+    if (_next_block == metadata->object.blocks.size()) {
+      ++_next_object;
+      _next_block = 0;
+    }
+    if (split->rows && !split->chunks.empty()) {
+      split->gpu_peak_bytes = tae_decode_reservation_floor(split->chunks);
+      return split;
+    }
+  }
+  return {};
+}
 
 std::unique_ptr<batch_coalescer> tae_gpu_ingestible::create_batch_coalescer() const
 {
@@ -265,6 +676,7 @@ std::unique_ptr<batch_coalescer> tae_gpu_ingestible::create_batch_coalescer() co
 
 bool tae_gpu_ingestible::has_processed_all_metadata() const
 {
+  if (is_live()) return live_exhausted();
   if (_metadata_stop.stop_requested()) return true;
   std::lock_guard lock(_work_mutex);
   return _next_object >= _info->bind_data->objects.size();
@@ -275,6 +687,7 @@ void tae_gpu_ingestible::stop_metadata_scan() noexcept { _metadata_stop.request_
 gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
   io::ioctx_resolver resolve)
 {
+  if (is_live()) throw failure(SIRIUS_INVALID_STATE, "embedded TAE uses demand scheduling");
   if (!resolve) { throw std::runtime_error("TAE ingestible has no scan-manager I/O resolver"); }
   if (_metadata_stop.stop_requested()) return nullptr;
   std::size_t object_index, block_index;
@@ -462,17 +875,31 @@ filtered_table tae_gpu_ingestible::materialize_metadata_to_table(
   std::shared_ptr<const sirius::like_multiliteral_cache>)
 {
   auto const& info = dynamic_cast<tae_scan_info const&>(generic_info);
-  if (!info.host_data || info.chunks.empty()) {
+  if ((!info.host_data && !info.work_permit) || info.chunks.empty()) {
     return {.table = owning_table_view{make_empty_table(mem_space, stream)},
             .state = filter_state::UNFILTERED};
   }
 
+  if (info.work_permit) {
+    if (info.chunks.size() >
+        info.work_permit->chunk_limit(sizeof(host_tae_representation::column_chunk_info)))
+      throw failure(SIRIUS_RESOURCE_EXHAUSTED,
+                    "TAE converter descriptors exceed work metadata entitlement");
+    if (info.admitted_bytes.load(std::memory_order_acquire) < info.gpu_peak_bytes)
+      throw failure(SIRIUS_INVALID_STATE, "TAE decode requires full GPU admission");
+  }
   host_tae_representation host{const_cast<cucascade::memory::memory_space*>(&mem_space),
                                info.host_data,
                                info.chunks,
                                info.rows,
                                info.compressed_bytes,
                                info.uncompressed_bytes};
+  if (info.work_permit) {
+    host.set_device_loader(
+      [&info](void* device, std::size_t bytes, rmm::cuda_stream_view upload_stream) {
+        upload_embedded_payload(info, device, bytes, upload_stream);
+      });
+  }
   auto gpu = sirius::converter_registry::get().convert<cucascade::gpu_table_representation>(
     host, &mem_space, stream);
   return {.table = owning_table_view{gpu->release_table(stream)},

@@ -51,6 +51,28 @@ __global__ void invert_mask_kernel(const uint8_t* __restrict__ src,
   }
 }
 
+__device__ void clear_null_word(
+  const uint8_t* src, uint32_t* dst, uint32_t word, uint32_t rows, uint32_t row_offset)
+{
+  auto bits        = load_unaligned_le_u32(src + word * sizeof(uint32_t));
+  auto const valid = min(uint32_t{32}, rows - word * 32);
+  if (valid < 32) bits &= (uint32_t{1} << valid) - 1;
+  auto const begin = row_offset + word * 32;
+  auto const shift = begin % 32;
+  atomicAnd(dst + begin / 32, ~(bits << shift));
+  if (shift && valid > 32 - shift) atomicAnd(dst + begin / 32 + 1, ~(bits >> (32 - shift)));
+}
+
+__global__ void invert_mask_at_kernel(const uint8_t* src,
+                                      uint32_t* dst,
+                                      uint32_t rows,
+                                      uint32_t row_offset)
+{
+  auto const words = (rows + 31) / 32;
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < words; i += gridDim.x * blockDim.x)
+    clear_null_word(src, dst, i, rows, row_offset);
+}
+
 // Batched null mask inversion — 2D grid: blockIdx.y = desc, blockIdx.x = word tile
 __global__ void batched_invert_mask_kernel(const BatchedNullMaskDesc* __restrict__ descs,
                                            uint32_t* __restrict__ dst)
@@ -58,11 +80,10 @@ __global__ void batched_invert_mask_kernel(const BatchedNullMaskDesc* __restrict
   auto const& desc = descs[blockIdx.y];
   uint32_t n_words = (desc.n_rows + 31) / 32;
   auto const* src  = desc.src;
-  auto* out        = dst + desc.bitmask_word_offset;
 
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_words;
        i += gridDim.x * blockDim.x) {
-    out[i] = ~load_unaligned_le_u32(src + i * sizeof(uint32_t));
+    clear_null_word(src, dst, i, desc.n_rows, desc.bitmask_row_offset);
   }
 }
 
@@ -97,6 +118,18 @@ void batched_invert_null_mask(const BatchedNullMaskDesc* d_descs,
   uint32_t grid_x    = (max_words + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
   dim3 grid(grid_x, n_descs);
   batched_invert_mask_kernel<<<grid, THREADS_PER_BLOCK, 0, stream.value()>>>(d_descs, d_validity);
+}
+
+void invert_null_mask_at(const uint8_t* src,
+                         uint32_t* dst,
+                         uint32_t rows,
+                         uint32_t row_offset,
+                         rmm::cuda_stream_view stream)
+{
+  if (!rows) return;
+  auto const blocks = ((rows + 31) / 32 + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  invert_mask_at_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
+    src, dst, rows, row_offset);
 }
 
 }  // namespace sirius::cuda::tae

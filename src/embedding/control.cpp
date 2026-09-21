@@ -4,6 +4,7 @@
 #include "embedding/control.hpp"
 
 #include "embedding/input.hpp"
+#include "embedding/tae_demand.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
 #include <algorithm>
@@ -253,10 +254,24 @@ void engine_control::register_read(std::shared_ptr<query_state> const& q,
   for (auto const& current : q->bindings)
     if (current.binding_id == owned.binding_id)
       throw failure(SIRIUS_INVALID_ARGUMENT, "duplicate native read binding");
-  q->metadata_leases.reserve(q->metadata_leases.size() + 1);
+  // Reserve the complete bounded TAE runtime envelope BEFORE prepare can
+  // allocate its cache, object metadata or work descriptors. Serialized plan
+  // and manifest accounting above remains additive within the same 256 MiB
+  // engine budget. Registration is serialized so two first reads cannot both
+  // omit the charge (or both retain it).
+  buffer_budget::lease tae_runtime_credit;
+  bool const first_tae = owned.source_kind == SIRIUS_READ_TAE &&
+                         std::none_of(q->bindings.begin(), q->bindings.end(), [](auto const& read) {
+                           return read.source_kind == SIRIUS_READ_TAE;
+                         });
+  if (first_tae && metadata_budget_->try_acquire(tae_metadata_reservation_bytes,
+                                                 tae_runtime_credit) != SIRIUS_OK)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native TAE runtime metadata capacity reached");
+  q->metadata_leases.reserve(q->metadata_leases.size() + (first_tae ? 2 : 1));
   q->bindings.reserve(q->bindings.size() + 1);
-  q->metadata_bytes += charged;
+  q->metadata_bytes += charged + (first_tae ? tae_metadata_reservation_bytes : 0);
   q->metadata_leases.push_back(std::move(credit));
+  if (first_tae) q->metadata_leases.push_back(std::move(tae_runtime_credit));
   q->bindings.push_back(std::move(owned));
 }
 sirius_error engine_control::prepare(std::shared_ptr<query_state> const& q,

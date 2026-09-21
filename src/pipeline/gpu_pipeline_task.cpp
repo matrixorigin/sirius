@@ -71,6 +71,7 @@ std::string exception_message(const std::exception_ptr& error)
 }
 
 struct quarantined_task_owners {
+  std::shared_ptr<void> execution_lease;
   std::unique_ptr<op::operator_data> input;
   std::unique_ptr<op::operator_data> pending_output;
   std::unique_ptr<op::operator_data> materialized_input;
@@ -82,7 +83,8 @@ void quarantine_task_owners(std::unique_ptr<op::operator_data> input,
                             std::unique_ptr<op::operator_data> pending_output,
                             std::unique_ptr<op::operator_data> materialized_input,
                             std::unique_ptr<op::operator_data> output,
-                            std::unique_ptr<op::operator_data> rescheduled_input) noexcept
+                            std::unique_ptr<op::operator_data> rescheduled_input,
+                            std::shared_ptr<void> execution_lease) noexcept
 {
   // Synchronization failure is process-fatal. Retain task owners until
   // fail-stop exit lets OS/CUDA teardown become the terminal cleanup owner.
@@ -93,6 +95,7 @@ void quarantine_task_owners(std::unique_ptr<op::operator_data> input,
   slot->materialized_input = std::move(materialized_input);
   slot->output             = std::move(output);
   slot->rescheduled_input  = std::move(rescheduled_input);
+  slot->execution_lease    = std::move(execution_lease);
 
   try {
     static std::mutex mutex;
@@ -444,6 +447,7 @@ gpu_pipeline_task::gpu_pipeline_task(
   // Subscribe to all input data_batches
   auto& ls = _local_state->cast<gpu_pipeline_task_local_state>();
   if (ls._input_data) {
+    if (!ls.execution_lease) { ls.execution_lease = ls._input_data->execution_lease(); }
     auto* pipelineable_input =
       dynamic_cast<const op::pipelineable_operator_data*>(ls._input_data.get());
     if (pipelineable_input) {
@@ -822,6 +826,7 @@ void gpu_pipeline_task::execute(::cuda::stream_ref stream)
 
   try {
     try {
+      _in_flight_data->gpu_admitted(reservation_bytes);
       _in_flight_data->prepare_for_processing(requested_memory_space, stream);
       // synchronizing here to ensure the timing collected by Quent and logging for preparing the
       // task is accurate.
@@ -986,11 +991,13 @@ void gpu_pipeline_task::quarantine_failed_task_owners(
   std::unique_ptr<op::operator_data> output,
   std::unique_ptr<op::operator_data> rescheduled_input) noexcept
 {
-  quarantine_task_owners(std::move(input),
-                         std::move(pending_output),
-                         std::move(materialized_input),
-                         std::move(output),
-                         std::move(rescheduled_input));
+  quarantine_task_owners(
+    std::move(input),
+    std::move(pending_output),
+    std::move(materialized_input),
+    std::move(output),
+    std::move(rescheduled_input),
+    std::move(_local_state->cast<gpu_pipeline_task_local_state>().execution_lease));
 }
 
 std::size_t gpu_pipeline_task::get_input_size() const
@@ -1081,7 +1088,9 @@ pipeline::reservation_size_info gpu_pipeline_task::get_estimated_reservation_siz
 
   auto const normal_reservation =
     memory::saturating_add(info.peak_memory_estimate, bytes_to_materialize);
-  info.reservation_size = std::max(normal_reservation, info.retry_reservation_floor);
+  info.reservation_size    = std::max(normal_reservation, info.retry_reservation_floor);
+  info.mandatory_gpu_bytes = ls._input_data ? ls._input_data->mandatory_gpu_reservation_bytes() : 0;
+  info.reservation_size    = std::max(info.reservation_size, info.mandatory_gpu_bytes);
   return info;
 }
 
