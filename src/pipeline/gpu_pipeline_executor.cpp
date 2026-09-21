@@ -147,6 +147,7 @@ bool gpu_pipeline_executor::try_admit(gpu_pipeline_task& task)
       reservation = _memory_space->make_reservation_or_null(floor);
     }
     if (reservation) {
+      if (handler) handler->tae_gpu_reservation_admitted(reservation->size());
       local->set_reservation(std::move(reservation), info);
       return true;
     }
@@ -158,6 +159,7 @@ bool gpu_pipeline_executor::try_admit(gpu_pipeline_task& task)
       if (_admission_downgrade.valid()) { _admission_downgrade.get(); }
       _admission_downgrade = _downgrade_executor->request_free_memory(floor);
     }
+    if (handler) handler->tae_gpu_admission_waited();
     return false;
   } catch (...) {
     if (handler) { handler->report_error(std::current_exception()); }
@@ -492,6 +494,18 @@ void gpu_pipeline_executor::process_task(
             completion->report_error("GPU task retry or completion callback failed");
           }
         };
+        struct task_observer {
+          std::shared_ptr<completion_handler> const& completion;
+          explicit task_observer(std::shared_ptr<completion_handler> const& value)
+            : completion(value)
+          {
+            if (completion) completion->gpu_task_started();
+          }
+          ~task_observer()
+          {
+            if (completion) completion->gpu_task_completed();
+          }
+        } observed(completion);
         try {
           if (completion) completion->record_task_started();
           task->execute(::cuda::stream_ref{exc_stream.get()});

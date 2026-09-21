@@ -417,3 +417,14 @@ extern "C" sirius_status sirius_query_get_result_stats(sirius_query_handle* quer
     return {};
   });
 }
+extern "C" sirius_status sirius_query_get_execution_stats(sirius_query_handle* query,
+                                                          sirius_query_execution_stats* out,
+                                                          sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query, "missing query");
+    require_options(out);
+    *out = query->control->inspect_execution(query->state);
+    return {};
+  });
+}

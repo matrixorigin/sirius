@@ -86,10 +86,11 @@ int main(int argc, char** argv)
   CHECK(sirius_engine_close(&engine, 0, &error) == SIRIUS_OK);
   CHECK(sirius_query_close(&query, 0, &error) == SIRIUS_OK);
   if (argc == 2) {
-    sirius_query_options qopts = {sizeof(qopts), SIRIUS_ABI_VERSION, 10000, 0};
-    sirius_engine_stats stats  = {sizeof(stats), SIRIUS_ABI_VERSION, 0, 0, 0, 0};
-    options.config_path        = argv[1];
-    options.config_path_bytes  = (uint32_t)strlen(argv[1]);
+    sirius_query_options qopts             = {sizeof(qopts), SIRIUS_ABI_VERSION, 10000, 0};
+    sirius_engine_stats stats              = {sizeof(stats), SIRIUS_ABI_VERSION, 0, 0, 0, 0};
+    sirius_query_execution_stats execution = {sizeof(execution), SIRIUS_ABI_VERSION};
+    options.config_path                    = argv[1];
+    options.config_path_bytes              = (uint32_t)strlen(argv[1]);
     if (sirius_engine_create(&options, &engine, &error) != SIRIUS_OK) {
       fprintf(stderr, "engine create: %s\n", error.message);
       result = 1;
@@ -103,6 +104,11 @@ int main(int argc, char** argv)
     CHECK(second == NULL);
     CHECK(make_bound_plan(&plan));
     CHECK(sirius_query_create(engine, &qopts, plan.data, plan.size, &query, &error) == SIRIUS_OK);
+    --execution.struct_size;
+    CHECK(sirius_query_get_execution_stats(query, &execution, &error) == SIRIUS_INVALID_ARGUMENT);
+    execution.struct_size = sizeof(execution);
+    CHECK(sirius_query_get_execution_stats(query, &execution, &error) == SIRIUS_OK);
+    CHECK(!execution.terminal && execution.source_mask == 0);
     {
       sirius_input_column column     = {23, 0, 0, 0};
       sirius_column logical          = {23, 0, 0, 0, "c", 1, 0};
@@ -136,6 +142,8 @@ int main(int argc, char** argv)
       CHECK(sirius_query_bind(query, &contract, &error) == SIRIUS_OK);
       memset(query_identity, 'X', sizeof(query_identity));
       CHECK(sirius_read_register(query, &binding, &error) == SIRIUS_OK);
+      CHECK(sirius_query_get_execution_stats(query, &execution, &error) == SIRIUS_OK);
+      CHECK(execution.source_mask == SIRIUS_QUERY_SOURCE_MO);
       CHECK(sirius_input_register(query, 1, &column, 1, &input, &error) == SIRIUS_OK);
       CHECK(sirius_input_acquire(input, 8, 0, &batch, &error) == SIRIUS_INVALID_STATE);
       CHECK(batch == NULL);
@@ -165,6 +173,14 @@ int main(int argc, char** argv)
       CHECK(observed == value);
       CHECK(sirius_input_write(batch, 0, &value, sizeof(value), &error) == SIRIUS_INVALID_ARGUMENT);
       CHECK(sirius_query_wait(query, 10000, &error) == SIRIUS_OK);
+      CHECK(sirius_query_get_execution_stats(query, &execution, &error) == SIRIUS_OK);
+      CHECK(execution.terminal && execution.terminal_status == SIRIUS_OK && !execution.fatal);
+      CHECK(execution.gpu_tasks_started > 0 &&
+            execution.gpu_tasks_started == execution.gpu_tasks_completed);
+      CHECK(execution.mo_input_units > 0 && execution.mo_input_peak_charged_bytes > 0);
+      CHECK(execution.result_rows == 1 && execution.result_payload_bytes >= sizeof(value));
+      CHECK(execution.result_retained_charged_bytes > 0 &&
+            execution.result_peak_charged_bytes >= execution.result_retained_charged_bytes);
     }
     CHECK(sirius_query_cancel(query, &error) == SIRIUS_OK);
     CHECK(sirius_query_wait(query, 10000, &error) == SIRIUS_OK);
@@ -172,6 +188,8 @@ int main(int argc, char** argv)
     CHECK(sirius_input_close(&input, &error) == SIRIUS_OK && input == NULL);
     CHECK(sirius_query_close(&query, 10000, &error) == SIRIUS_BUSY && query != NULL);
     CHECK(sirius_batch_release(&batch, &error) == SIRIUS_OK && batch == NULL);
+    CHECK(sirius_query_get_execution_stats(query, &execution, &error) == SIRIUS_OK);
+    CHECK(execution.result_retained_charged_bytes == 0);
     CHECK(sirius_query_close(&query, 10000, &error) == SIRIUS_OK && query == NULL);
     CHECK(sirius_query_create(engine, &qopts, "x", 1, &query, &error) == SIRIUS_OK);
     CHECK(sirius_query_create(engine, &qopts, "x", 1, &query, &error) == SIRIUS_INVALID_ARGUMENT);

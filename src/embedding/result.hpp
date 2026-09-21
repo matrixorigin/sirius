@@ -3,6 +3,7 @@
 #include "embedding/input.hpp"
 
 #include <array>
+#include <utility>
 
 namespace sirius::embedding {
 inline constexpr std::size_t result_window = 64u << 20;
@@ -11,12 +12,13 @@ class native_result;
 struct result_batch {
   ~result_batch();
   std::shared_ptr<native_result> owner;
+  std::shared_ptr<execution_stats> stats;
   buffer_budget::lease credit;
   std::shared_ptr<input_pool> pool;
   std::unique_ptr<input_storage> storage;
   std::unique_ptr<sirius_input_vector[]> columns;
   uint32_t rows{}, column_count{};
-  std::size_t payload_bytes{};
+  std::size_t payload_bytes{}, charged_bytes{};
   enum class phase { filling, queued, borrowed } state{phase::filling};
 };
 
@@ -24,6 +26,7 @@ struct result_batch {
 // includes its object, descriptors and allocator-rounded payload storage.
 class native_result : public std::enable_shared_from_this<native_result> {
  public:
+  explicit native_result(std::shared_ptr<execution_stats> stats = {}) : stats_(std::move(stats)) {}
   void activate(std::shared_ptr<input_pool> pool);
   std::size_t allocation_charge(std::size_t bytes, uint32_t columns) const;
   sirius_status try_allocate(std::size_t bytes,
@@ -40,6 +43,7 @@ class native_result : public std::enable_shared_from_this<native_result> {
   void released(result_batch::phase state) noexcept;
 
  private:
+  std::shared_ptr<execution_stats> stats_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   buffer_budget budget_{result_window, 128};

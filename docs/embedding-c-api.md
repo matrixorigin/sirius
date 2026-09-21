@@ -219,6 +219,50 @@ and `sirius_batch_release` releases either kind.
 | `sirius_result_read` | Copies a checked byte range synchronously into caller-owned memory. Physical pinned blocks may be segmented; no contiguous native payload pointer is exposed or retained. |
 | `sirius_query_get_result_stats` | Reports retained/peak charged bytes, leases, filling/queued/borrowed batches, current parked publications and cumulative capacity misses. |
 
+### Query execution telemetry (G0)
+
+`sirius_query_get_execution_stats` returns a thread-safe query-local snapshot at
+any point after query creation. The snapshot remains available after execution
+and cleanup quiesce, including success, cancellation, timeout and fatal failure,
+and is valid until the query is successfully closed. As with every versioned C
+output, callers must set the exact `struct_size` and `SIRIUS_ABI_VERSION`; a
+different size or version is rejected. This operation is additive to ABI version
+1 and does not change the capability mask.
+
+The source mask uses `SIRIUS_QUERY_SOURCE_MO` and
+`SIRIUS_QUERY_SOURCE_TAE`. `terminal` distinguishes a live query from a
+terminal `SIRIUS_OK` status, `terminal_status` retains the query outcome, and
+`fatal` identifies a fail-stop `SIRIUS_GPU_UNAVAILABLE` outcome. The terminal
+status/fatal pair is published atomically and is first-terminal-wins. GPU task
+counts cover attempts that entered an executor worker and attempts whose worker
+scope retired; retries are separate attempts. At successful quiescence the two
+counts therefore match.
+
+| Fields | Meaning |
+| --- | --- |
+| `mo_input_units` | Cumulative expanded source units claimed for GPU work, including the single empty-input unit. |
+| `mo_input_retained_charged_bytes`, `mo_input_peak_charged_bytes` | Current and query peak input-window charges across every MO read. Charges include rounded pinned blocks and retained descriptors. |
+| `mo_input_blocked_acquires` | Cumulative producer acquisitions that had to wait for input credit. |
+| `tae_requests`, `tae_work_issued`, `tae_work_completed` | Cumulative accepted controller notifications, successfully constructed permits and retirement of those permits. Budget-admission or permit-allocation failures do not create issued/completed work. |
+| `tae_active_work`, `tae_peak_active_work`, `tae_peak_queued_work`, `tae_work_limit` | Current/peak permit activity, peak pending notifications and the configured permit limit. |
+| `tae_slice_bytes`, `tae_peak_staging_charged_bytes` | Per-permit staging entitlement and peak aggregate charged staging entitlements. |
+| `tae_peak_cached_metadata_charged_bytes` | Peak cache-accounting charge, including bounded key/ownership overhead. |
+| `tae_gpu_admission_waits`, `tae_peak_gpu_reservation_admitted_bytes` | For a TAE-bearing query, cumulative failed nonblocking strict-admission attempts and the largest reservation admitted by the strict TAE task path. These remain zero for MO-only queries; mixed-source queries report the query-wide TAE admission observations. |
+| `tae_payload_bytes` | Cumulative logical compressed payload bytes read after GPU admission, including retry rereads; metadata I/O and CRC framing bytes are excluded. |
+| `result_rows`, `result_payload_bytes` | Cumulative successfully published rows and logical MO-layout payload bytes. |
+| `result_retained_charged_bytes`, `result_peak_charged_bytes` | Current and query peak result-window charges, including rounded pinned blocks, batches and descriptors. |
+| `result_blocked_publications`, `result_parked_publications` | Cumulative result capacity misses and current publications parked for returned capacity. |
+
+Every field explicitly named `charged` or `admitted` is a capacity-control
+quantity. It is not an actual CUDA allocation peak, GPU high-water mark, host
+RSS, or process-memory peak. Payload byte counters are logical transferred or
+published bytes and likewise do not include every allocator or transport
+overhead. Current retained-charge gauges retire after physical storage and
+descriptors are released but immediately before the underlying credit is
+returned and waiters are notified. A concurrent snapshot may therefore lead the
+private budget release by that short handoff interval, but it cannot count both
+the retiring owner and the newly admitted owner against the same credit.
+
 Result vectors are flat MO layouts. Scalars are little-endian, decimals retain
 their integer representation and declared scale, and DATE/DATETIME use MO's
 epoch and units. Raw null words use one for NULL. Values and varlena descriptors
@@ -279,9 +323,9 @@ batch is unsafe because it can duplicate rows already observed by the caller.
 pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
   '[native_control],[native_credit]'
 pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
-  '[native_input],[native_result]'
+  '[native_input],[native_result],[native_stats]'
 pixi run build/upstream-dev-merge/extension/sirius/sirius_native_gpu_unittest \
-  '[native_gpu],[native_result_gpu]'
+  '[native_gpu],[native_result_gpu],[native_admission]'
 pixi run build/upstream-dev-merge/extension/sirius/sirius_c_smoke \
   test/cpp/scan/memory.yaml
 pixi run build/upstream-dev-merge/extension/sirius/sirius_native_result_integration \
@@ -298,7 +342,8 @@ deadline-versus-wait-timeout distinction, fatal owner retention and credit
 lifetime. Fatal retention runs in a test-owned child process because process
 death is deliberately its final cleanup owner. The C smoke test separately
 exercises real native linkage, one-row production input/execution/result
-delivery, wrong-kind handle rejection, borrowed-result close protection,
+delivery, execution-stats layout rejection and quiescent snapshot retention,
+wrong-kind handle rejection, borrowed-result close protection,
 rejection of a second simultaneous runtime, and GPU runtime shutdown/recreation
 with the default two workers followed by one worker.
 

@@ -25,17 +25,23 @@ struct tae_demand_state {
     std::size_t bytes;
   };
   std::shared_ptr<buffer_budget> budget;
+  std::shared_ptr<execution_stats> stats;
   std::mutex mutex;
   std::condition_variable changed;
   std::deque<tae_demand_controller::work> pending;
   std::list<cache_entry> cache;
+  // Controller slots include the worker's short admission/construction phase.
+  // Public active/issued stats begin only after a real permit exists.
   std::size_t limit, slice, work_metadata, active{0}, peak{0}, cache_bytes{0};
   bool closed{false};
-  void retire() noexcept
+  void retire_slot() noexcept { retire(false); }
+  void retire_permit() noexcept { retire(true); }
+  void retire(bool issued) noexcept
   {
     {
       std::lock_guard lock(mutex);
       --active;
+      if (issued && stats) stats->tae_complete();
     }
     changed.notify_one();
   }
@@ -54,10 +60,14 @@ tae_work_permit::~tae_work_permit()
   // Restore the byte entitlement before making the work slot available.
   storage_.reset();
   credit_.reset();
-  owner_->retire();
+  owner_->retire_permit();
 }
 
 std::size_t tae_work_permit::metadata_bytes() const noexcept { return owner_->work_metadata; }
+void tae_work_permit::record_payload_bytes(std::size_t bytes) const noexcept
+{
+  if (owner_->stats) owner_->stats->tae_payload(bytes);
+}
 std::size_t tae_work_permit::chunk_limit(std::size_t chunk_size) const noexcept
 {
   return std::min(tae_chunk_vector_limit / chunk_size,
@@ -66,7 +76,8 @@ std::size_t tae_work_permit::chunk_limit(std::size_t chunk_size) const noexcept
 
 tae_demand_controller::tae_demand_controller(std::size_t streams,
                                              std::shared_ptr<buffer_budget> budget,
-                                             std::size_t capacity)
+                                             std::size_t capacity,
+                                             std::shared_ptr<execution_stats> stats)
   : state_(std::make_shared<tae_demand_state>()), worker_(std::make_unique<worker>())
 {
   if (!budget || streams > 128)
@@ -77,7 +88,9 @@ tae_demand_controller::tae_demand_controller(std::size_t streams,
   s.slice         = std::min(tae_max_slice, capacity / s.limit) / crc_block_bytes * crc_block_bytes;
   if (s.slice == 0 || capacity > tae_host_capacity)
     throw std::invalid_argument("TAE host capacity cannot provide a CRC slice per work permit");
-  s.budget        = std::move(budget);
+  s.budget = std::move(budget);
+  s.stats  = std::move(stats);
+  if (s.stats) s.stats->tae_configure(s.limit, s.slice);
   worker_->thread = std::thread([state = state_] {
     for (;;) {
       work callback;
@@ -98,7 +111,7 @@ tae_demand_controller::tae_demand_controller(std::size_t streams,
       // closed/miswired budget; deliver an empty permit so the source reports
       // an error without losing its durable wakeup.
       if (status != SIRIUS_OK) {
-        state->retire();
+        state->retire_slot();
         callback(nullptr);
         continue;
       }
@@ -107,9 +120,14 @@ tae_demand_controller::tae_demand_controller(std::size_t streams,
         permit = std::make_shared<tae_work_permit>(std::move(credit), state);
       } catch (...) {
         credit.reset();
-        state->retire();
+        state->retire_slot();
         callback(nullptr);
         continue;
+      }
+      // No callback can retire this local permit before its issued transition.
+      if (state->stats) {
+        state->stats->tae_issue();
+        state->stats->tae_staging(state->budget->inspect().peak);
       }
       callback(std::move(permit));
     }
@@ -127,6 +145,7 @@ bool tae_demand_controller::request(work callback)
     if (state_->pending.size() == tae_pending_sources_limit)
       throw failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE pending metadata source limit reached");
     state_->pending.push_back(std::move(callback));
+    if (state_->stats) state_->stats->tae_request(state_->pending.size());
   }
   state_->changed.notify_one();
   return true;
@@ -203,11 +222,16 @@ void tae_demand_controller::cache_metadata(std::string key,
   }
   state_->cache.push_front({std::move(key), std::move(value), bytes});
   state_->cache_bytes += bytes;
+  if (state_->stats) state_->stats->tae_cache(state_->cache_bytes);
 }
 
 std::shared_ptr<tae_demand_controller> make_tae_demand_controller(
-  std::size_t streams, std::shared_ptr<buffer_budget> budget, std::size_t capacity)
+  std::size_t streams,
+  std::shared_ptr<buffer_budget> budget,
+  std::size_t capacity,
+  std::shared_ptr<execution_stats> stats)
 {
-  return std::make_shared<tae_demand_controller>(streams, std::move(budget), capacity);
+  return std::make_shared<tae_demand_controller>(
+    streams, std::move(budget), capacity, std::move(stats));
 }
 }  // namespace sirius::embedding

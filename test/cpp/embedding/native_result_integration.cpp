@@ -331,6 +331,26 @@ void tae_results(sirius_engine_handle* engine)
   ok(sirius_query_get_result_stats(run.query, &stats, &error), error);
   require(stats.peak_bytes <= (64u << 20) && stats.retained_bytes == 0,
           "TAE native result exceeded its window or leaked released output");
+  sirius_query_execution_stats execution{sizeof(execution), SIRIUS_ABI_VERSION};
+  ok(sirius_query_get_execution_stats(run.query, &execution, &error), error);
+  require(execution.source_mask == SIRIUS_QUERY_SOURCE_TAE && execution.terminal &&
+            execution.terminal_status == SIRIUS_OK && !execution.fatal,
+          "TAE execution telemetry lost its source or terminal outcome");
+  require(
+    execution.gpu_tasks_started > 0 && execution.gpu_tasks_started == execution.gpu_tasks_completed,
+    "TAE execution telemetry did not retain quiesced GPU task counts");
+  require(execution.tae_requests > 0 && execution.tae_requests == execution.tae_work_issued &&
+            execution.tae_work_issued == execution.tae_work_completed &&
+            execution.tae_active_work == 0 && execution.tae_peak_active_work > 0 &&
+            execution.tae_peak_queued_work > 0 && execution.tae_work_limit >= 2 &&
+            execution.tae_slice_bytes > 0 && execution.tae_peak_staging_charged_bytes > 0 &&
+            execution.tae_peak_gpu_reservation_admitted_bytes > 0 &&
+            execution.tae_payload_bytes > 0,
+          "TAE execution telemetry did not retain bounded demand/admission activity");
+  require(execution.result_rows == observed.size() &&
+            execution.result_payload_bytes >= observed.size() * sizeof(int32_t) &&
+            execution.result_retained_charged_bytes == 0 && execution.result_peak_charged_bytes > 0,
+          "TAE execution telemetry lost native result activity");
   ok(sirius_query_close(&run.query, 30000, &error), error);
 }
 }  // namespace

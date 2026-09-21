@@ -130,6 +130,33 @@ enum {
   SIRIUS_BUSY               = 11
 };
 
+enum { SIRIUS_QUERY_SOURCE_MO = 1u, SIRIUS_QUERY_SOURCE_TAE = 2u };
+
+/* Query-local execution telemetry. Charged/admitted byte fields are capacity
+ * accounting values, not measured device/process-memory high-water marks. */
+typedef struct sirius_query_execution_stats {
+  uint32_t struct_size, abi_version;
+  uint32_t source_mask;
+  uint32_t terminal;
+  sirius_status terminal_status;
+  uint32_t fatal;
+  uint64_t gpu_tasks_started, gpu_tasks_completed;
+  uint64_t mo_input_units;
+  uint64_t mo_input_retained_charged_bytes, mo_input_peak_charged_bytes;
+  uint64_t mo_input_blocked_acquires;
+  uint64_t tae_requests, tae_work_issued, tae_work_completed;
+  uint64_t tae_active_work, tae_peak_active_work, tae_peak_queued_work;
+  uint64_t tae_work_limit, tae_slice_bytes;
+  uint64_t tae_peak_cached_metadata_charged_bytes;
+  uint64_t tae_peak_staging_charged_bytes;
+  uint64_t tae_gpu_admission_waits;
+  uint64_t tae_peak_gpu_reservation_admitted_bytes;
+  uint64_t tae_payload_bytes;
+  uint64_t result_rows, result_payload_bytes;
+  uint64_t result_retained_charged_bytes, result_peak_charged_bytes;
+  uint64_t result_blocked_publications, result_parked_publications;
+} sirius_query_execution_stats;
+
 enum {
   SIRIUS_CAP_ENGINE_CONTROL = 1u,
   SIRIUS_CAP_MO_INPUT       = 2u,
@@ -243,6 +270,9 @@ sirius_status sirius_result_read(sirius_batch_handle* batch,
 sirius_status sirius_query_get_result_stats(sirius_query_handle* query,
                                             sirius_result_stats* out,
                                             sirius_error* error);
+sirius_status sirius_query_get_execution_stats(sirius_query_handle* query,
+                                               sirius_query_execution_stats* out,
+                                               sirius_error* error);
 
 /* Register while CREATED; acquire only after successful startable preparation. Each read
  * has a strict 64 MiB window, including filling, queued and GPU/retry owners.

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "embedding/buffer_budget.hpp"
+#include "embedding/execution_stats.hpp"
 #include "sirius_c.h"
 
 #include <array>
@@ -109,6 +110,7 @@ enum class query_phase {
 struct query_state {
   std::shared_ptr<input_registry> inputs;
   std::shared_ptr<native_result> results;
+  std::shared_ptr<execution_stats> stats;
   std::vector<sirius_column> result_schema;
   std::string plan;
   clock::time_point deadline;
@@ -153,6 +155,7 @@ class engine_control {
   void bind_query(std::shared_ptr<query_state> const&, const sirius_query_contract&);
   void register_read(std::shared_ptr<query_state> const&, const sirius_read_binding&);
   sirius_result_schema result_schema(std::shared_ptr<query_state> const&);
+  sirius_query_execution_stats inspect_execution(std::shared_ptr<query_state> const&) const;
   void require_result_active(std::shared_ptr<query_state> const&);
 
  private:

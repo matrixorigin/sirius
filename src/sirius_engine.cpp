@@ -290,6 +290,7 @@ void sirius_engine::execute(std::stop_token stop, std::chrono::steady_clock::tim
   if (!completion_handler_) {
     throw std::logic_error("execution requires a live window completion handler");
   }
+  completion_handler_->set_execution_stats(execution_stats_);
   completion_handler_->execution_owner = std::this_thread::get_id();
   auto future                          = completion_handler_->get_awaitable();
 
