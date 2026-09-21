@@ -773,14 +773,25 @@ std::unique_ptr<sirius::op::scan::tae_ingestible_table_info> build_tae_table_inf
       "[sirius_physical_plan_generator::build_tae_table_info] tae_scan has no bind data");
   }
 
-  auto copied_bind_data = scan_op.bind_data->Copy();
+  auto info = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
+  duckdb::unique_ptr<duckdb::FunctionData> copied_bind_data;
+  if (scan_op.function.name == sirius::embedding::embedded_tae_function) {
+    auto const* embedded =
+      dynamic_cast<const sirius::embedding::embedded_tae_bind_data*>(scan_op.bind_data.get());
+    if (!embedded || !embedded->manifest || !embedded->host_budget)
+      throw std::runtime_error("embedded TAE scan requires its query binding context");
+    copied_bind_data           = embedded->manifest->Copy();
+    info->embedded_manifest    = true;
+    info->embedded_host_budget = embedded->host_budget;
+  } else {
+    copied_bind_data = scan_op.bind_data->Copy();
+  }
   if (dynamic_cast<tae::TAEScanBindData*>(copied_bind_data.get()) == nullptr) {
     throw std::runtime_error(
       "[sirius_physical_plan_generator::build_tae_table_info] tae_scan bind data is not "
       "TAEScanBindData");
   }
 
-  auto info       = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
   info->bind_data = duckdb::unique_ptr<tae::TAEScanBindData>(
     static_cast<tae::TAEScanBindData*>(copied_bind_data.release()));
   info->returned_types = scan_op.returned_types;

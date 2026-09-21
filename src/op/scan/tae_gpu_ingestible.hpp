@@ -30,6 +30,8 @@ namespace sirius::op::scan {
 class tae_ingestible_table_info final : public ingestible_table_info {
  public:
   duckdb::unique_ptr<tae::TAEScanBindData> bind_data;
+  bool embedded_manifest{false};
+  std::shared_ptr<sirius::embedding::buffer_budget> embedded_host_budget;
   duckdb::vector<sirius::logical_type> returned_types;
   duckdb::vector<duckdb::ColumnIndex> column_ids;
   duckdb::vector<duckdb::idx_t> projection_ids;

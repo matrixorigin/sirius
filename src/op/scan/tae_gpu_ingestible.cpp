@@ -280,7 +280,7 @@ gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
   std::size_t object_index, block_index;
   {
     std::lock_guard lock(_work_mutex);
-    if (!_info->bind_data->embedded_manifest) {
+    if (!_info->embedded_manifest) {
       if (_next_object >= _info->bind_data->objects.size()) return nullptr;
       object_index = _next_object++;
       block_index  = std::numeric_limits<std::size_t>::max();
@@ -403,9 +403,9 @@ std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
     result->compressed_bytes += read.compressed_length;
     result->uncompressed_bytes += read.origin_size;
   }
-  if (_info->bind_data->embedded_host_budget && result->compressed_bytes) {
+  if (_info->embedded_host_budget && result->compressed_bytes) {
     auto credit = std::make_shared<sirius::embedding::buffer_budget::lease>();
-    auto status = _info->bind_data->embedded_host_budget->acquire(
+    auto status = _info->embedded_host_budget->acquire(
       result->compressed_bytes,
       _metadata_stop.get_token(),
       sirius::embedding::buffer_budget::clock::time_point::max(),

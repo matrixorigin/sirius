@@ -1,5 +1,6 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "embedding/control.hpp"
+#include "embedding/plan_bindings.hpp"
 #include "substrait/plan.pb.h"
 #include "tae_scanner.hpp"
 
@@ -119,4 +120,29 @@ TEST_CASE("embedded TAE manifest bytes are bounded and path confined", "[native_
   traversal.replace(path, 8, "../evil");
   tae::TAEScanBindData unsafe;
   REQUIRE_THROWS(tae::ParseManifestBytes(traversal, "s3://bucket/table", unsafe));
+}
+
+TEST_CASE("embedded TAE binding copies retain query-owned resources", "[native_binding][tae]")
+{
+  std::weak_ptr<sirius::embedding::buffer_budget> budget_lifetime;
+  std::weak_ptr<const tae::TAEScanBindData> manifest_lifetime;
+  duckdb::unique_ptr<duckdb::FunctionData> copied;
+  {
+    sirius::embedding::embedded_tae_bind_data original;
+    original.manifest    = std::make_shared<tae::TAEScanBindData>();
+    original.host_budget = std::make_shared<sirius::embedding::buffer_budget>(1024, 1);
+    budget_lifetime      = original.host_budget;
+    manifest_lifetime    = original.manifest;
+    copied               = original.Copy();
+    auto const* carrier =
+      dynamic_cast<const sirius::embedding::embedded_tae_bind_data*>(copied.get());
+    REQUIRE(carrier != nullptr);
+    CHECK(carrier->manifest == original.manifest);
+    CHECK(carrier->host_budget == original.host_budget);
+  }
+  CHECK_FALSE(budget_lifetime.expired());
+  CHECK_FALSE(manifest_lifetime.expired());
+  copied.reset();
+  CHECK(budget_lifetime.expired());
+  CHECK(manifest_lifetime.expired());
 }
