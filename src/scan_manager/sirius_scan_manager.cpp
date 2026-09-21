@@ -1560,7 +1560,11 @@ void sirius_scan_manager::prepare_for_query(
   for (auto const& scan_op : query.get_scan_operators()) {
     if (scan_op->type != ::sirius::op::SiriusPhysicalOperatorType::GPU_SCAN) { continue; }
     auto* op = &scan_op->Cast<op::scan::sirius_gpu_scan_operator>();
-    if (op->get_ingestible().is_live()) { continue; }
+    if (op->get_ingestible().is_live()) {
+      op->get_ingestible().live_set_io_resolver(
+        [this](std::string_view path) { return ioctx_for_path(path); });
+      continue;
+    }
     // One container for cached and disk-read scans alike, so this guard covers both. The old
     // providers-map guard missed cache-matched operators (they were recorded only in the
     // order vector), which would have let a repeated operator register its coalescer slot

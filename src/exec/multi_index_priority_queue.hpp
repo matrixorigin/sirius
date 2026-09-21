@@ -366,6 +366,22 @@ class multi_index_priority_queue {
     return std::nullopt;
   }
 
+  /// Mutable admission within a device bucket. An unsuccessful predicate leaves
+  /// ownership and downgrade visibility unchanged; it must not touch this queue.
+  template <typename Pred>
+  [[nodiscard]] std::optional<task_ptr> mutable_pop_if(const gpu_index& idx, Pred pred)
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto it = _by_device.find(idx.id);
+    if (it == _by_device.end()) { return std::nullopt; }
+    for (auto& [prio, bucket] : it->second) {
+      for (node* n : bucket) {
+        if (pred(*n->task)) { return extract_node(n); }
+      }
+    }
+    return std::nullopt;
+  }
+
   /// Removes and returns the first task satisfying `pred`, scanning the whole
   /// queue front-to-back (lowest priority first, FIFO within a level) when
   /// `front_to_back` is true, or back-to-front (highest priority first, most

@@ -64,6 +64,7 @@ duckdb::unique_ptr<duckdb::FunctionData> bind_tae(duckdb::ClientContext& context
   auto data         = duckdb::make_uniq<embedded_tae_bind_data>();
   data->manifest    = std::move(binding.tae);
   data->host_budget = std::move(binding.tae_host_budget);
+  data->tae_demand  = std::move(binding.tae_demand);
   return data;
 }
 void never_execute(duckdb::ClientContext&, duckdb::TableFunctionInput&, duckdb::DataChunk&)

@@ -318,12 +318,15 @@ void task_scheduler::management_eventloop()
 
       // Exact preference match: the device index returns the highest-priority
       // (lowest value) task preferring exactly this device.
-      task = _task_queue.try_pop_from(exec::gpu_index{device_id}).value_or(nullptr);
+      auto admit = [&](sirius::parallel::itask& candidate) {
+        auto* gpu_task = dynamic_cast<gpu_pipeline_task*>(&candidate);
+        if (!gpu_task) { return false; }
+        return _gpu_executors.at(device_id)->try_admit(*gpu_task);
+      };
+      task = _task_queue.mutable_pop_if(exec::gpu_index{device_id}, admit).value_or(nullptr);
       if (!task) {
-        // Pick a task with no preference (any device will do). Which GPU gets it is decided by
-        // whichever executor signalled ready first, not by any counter.
-        task =
-          _task_queue.try_pop_from(exec::gpu_index{exec::no_preferred_device}).value_or(nullptr);
+        task = _task_queue.mutable_pop_if(exec::gpu_index{exec::no_preferred_device}, admit)
+                 .value_or(nullptr);
       }
       if (!task) {
         // No dispatchable task for this device. Leave device in _ready_devices
@@ -338,6 +341,7 @@ void task_scheduler::management_eventloop()
       }
       auto* attributed     = dynamic_cast<gpu_pipeline_task*>(task.get());
       auto failure_handler = attributed ? attributed->get_completion_handler() : nullptr;
+      if (failure_handler && failure_handler->has_error()) continue;
       try {
         if (auto* gpu_task = dynamic_cast<pipeline::gpu_pipeline_task*>(task.get())) {
           {
@@ -373,6 +377,16 @@ void task_scheduler::management_eventloop()
         if (failure_handler) { failure_handler->report_error(std::current_exception()); }
       }
       // Refusal does not consume the parked executor's readiness. Try its next task.
+    }
+    if (!_ready_devices.empty() && !_task_queue.empty()) {
+      // Memory retirement in cuCascade has no public subscription API. New task/device
+      // events wake this bounded wait immediately; the 10ms backstop observes external
+      // reservation releases (including a borrowed result) without a spinning manager,
+      // a second task queue, or a worker blocked behind an inadmissible source.
+      auto event = _task_request_channel.get_for(10000);
+      if (event && event->kind == task_request_kind::device_ready) {
+        _ready_devices.emplace_back(event->device_id);
+      }
     }
   }
 }

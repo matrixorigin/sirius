@@ -395,6 +395,11 @@ sirius_gpu_scan_operator::~sirius_gpu_scan_operator() = default;
 std::optional<task_creation_hint> sirius_gpu_scan_operator::get_next_task_hint()
 {
   if (_ingestible && _ingestible->is_live()) {
+    if (auto pipeline = get_pipeline()) {
+      for (auto const& dependency : pipeline->dependencies)
+        if (!dependency->is_pipeline_finished()) return std::nullopt;
+    }
+    _ingestible->live_request();
     if (_ingestible->live_exhausted() || !_ingestible->live_ready()) return std::nullopt;
     return task_creation_hint{TaskCreationHint::READY, this};
   }

@@ -631,6 +631,7 @@ std::unique_ptr<sirius::op::scan::tae_ingestible_table_info> build_tae_table_inf
     copied_bind_data           = embedded->manifest->Copy();
     info->embedded_manifest    = true;
     info->embedded_host_budget = embedded->host_budget;
+    info->embedded_controller  = embedded->tae_demand;
   } else {
     copied_bind_data = scan_op.bind_data->Copy();
   }

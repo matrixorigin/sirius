@@ -9,6 +9,7 @@
 #include <mutex>
 
 namespace sirius::embedding {
+class tae_demand_controller;
 inline constexpr const char* embedded_mo_function  = "sirius_embedded_mo_read";
 inline constexpr const char* embedded_tae_function = "sirius_embedded_tae_read";
 
@@ -27,11 +28,13 @@ struct embedded_mo_bind_data final : duckdb::TableFunctionData {
 struct embedded_tae_bind_data final : duckdb::TableFunctionData {
   std::shared_ptr<const tae::TAEScanBindData> manifest;
   std::shared_ptr<buffer_budget> host_budget;
+  std::shared_ptr<tae_demand_controller> tae_demand;
   duckdb::unique_ptr<duckdb::FunctionData> Copy() const override
   {
     auto copy         = duckdb::make_uniq<embedded_tae_bind_data>();
     copy->manifest    = manifest;
     copy->host_budget = host_budget;
+    copy->tae_demand  = tae_demand;
     return copy;
   }
 };
@@ -42,6 +45,7 @@ struct embedded_binding {
   std::shared_ptr<native_input> input;
   std::shared_ptr<const tae::TAEScanBindData> tae;
   std::shared_ptr<buffer_budget> tae_host_budget;
+  std::shared_ptr<tae_demand_controller> tae_demand;
 };
 
 class embedded_bind_catalog final : public duckdb::ClientContextState {

@@ -38,6 +38,7 @@
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
 #include "embedding/plan_bindings.hpp"
+#include "embedding/tae_demand.hpp"
 #include "exec/stream_bind_catalog.hpp"   // sirius::exec::stream_bind_catalog
 #include "exec/stream_plan_bindings.hpp"  // sirius::exec::register_stream_source_function
 #include "exec/streaming_fragment.hpp"    // sirius::exec::streaming_fragment, fragment_spec
@@ -55,6 +56,8 @@
 #include "sirius_interface.hpp"
 #include "substrait/plan.pb.h"
 #include "tae_types.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <map>
@@ -175,6 +178,7 @@ struct Context::Impl {
   duckdb::shared_ptr<sirius::embedding::embedded_bind_catalog> embedded_catalog;
   std::size_t embedded_metadata_capacity{256u << 20};
   std::size_t embedded_tae_host_staging{64u << 20};
+  uint32_t embedded_gpu_streams{2};
 
   void bring_up(const sirius::parsed_sirius_config& config)
   {
@@ -265,11 +269,13 @@ struct EmbeddedPrepared::Impl {
   Context::Impl* context{};
   duckdb::shared_ptr<sirius::sirius_prepared_statement_data> plan;
   std::vector<std::string> views;
+  std::shared_ptr<embedding::tae_demand_controller> tae_demand;
   bool cleaned{false};
 
   void finish()
   {
     if (cleaned) return;
+    if (tae_demand) tae_demand->close();
     plan.reset();
     auto& conn = *context->conn;
     try {
@@ -367,8 +373,13 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
   auto const has_tae = std::any_of(query.bindings.begin(), query.bindings.end(), [](auto const& b) {
     return b.source_kind == SIRIUS_READ_TAE;
   });
-  auto tae_host_budget =
-    has_tae ? std::make_shared<embedding::buffer_budget>(impl_->embedded_tae_host_staging, 128)
+  auto tae_host_budget = has_tae ? std::make_shared<embedding::buffer_budget>(
+                                     impl_->embedded_tae_host_staging,
+                                     std::max<std::size_t>(2, 2 * impl_->embedded_gpu_streams))
+                                 : nullptr;
+  auto tae_demand =
+    has_tae ? embedding::make_tae_demand_controller(
+                impl_->embedded_gpu_streams, tae_host_budget, impl_->embedded_tae_host_staging)
             : nullptr;
   impl_->conn->BeginTransaction();
   std::vector<std::string> views;
@@ -409,6 +420,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
                                      "TAE manifest column binding mismatch");
         }
         binding.tae_host_budget = tae_host_budget;
+        binding.tae_demand      = tae_demand;
         binding.tae             = std::move(tae_bind);
         function                = embedding::embedded_tae_function;
       }
@@ -432,10 +444,11 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
     }
     auto physical = sirius::planner::sirius_physical_plan_generator(*impl_->conn->context)
                       .create_plan(std::move(lowered.plan));
-    auto owner     = std::make_unique<EmbeddedPrepared::Impl>();
-    owner->context = impl_.get();
-    owner->cleaned = true;  // The surrounding transaction still owns the new views.
-    owner->plan    = duckdb::make_shared_ptr<sirius::sirius_prepared_statement_data>(
+    auto owner        = std::make_unique<EmbeddedPrepared::Impl>();
+    owner->context    = impl_.get();
+    owner->tae_demand = std::move(tae_demand);
+    owner->cleaned    = true;  // The surrounding transaction still owns the new views.
+    owner->plan       = duckdb::make_shared_ptr<sirius::sirius_prepared_statement_data>(
       std::move(lowered.prepared), std::move(physical));
     owner->views = std::move(views);
     impl_->conn->Commit();
@@ -454,6 +467,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
 Context::Context(const std::string& config_path, uint32_t gpu_pipeline_threads)
   : impl_(std::make_unique<Impl>())
 {
+  impl_->embedded_gpu_streams = gpu_pipeline_threads;
   sirius::sirius_config config;
   config.load_from_file(config_path);
   config.set_gpu_pipeline_executor_threads(gpu_pipeline_threads);

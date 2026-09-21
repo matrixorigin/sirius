@@ -19,6 +19,8 @@
 
 #include <data/host_tae_representation.hpp>
 #include <data/host_tae_representation_converters.hpp>
+#include <embedding/control.hpp>
+#include <embedding/tae_demand.hpp>
 #include <log/logging.hpp>
 #include <tae/tae_format.hpp>
 
@@ -58,6 +60,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -161,6 +164,17 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   auto& host_src                         = source.cast<host_tae_representation>();
   auto const& chunks                     = host_src.get_column_chunks();
   auto const& post_filter_projection_ids = host_src.get_post_filter_projection_ids();
+  // The embedded controller charges 4096 host bytes per chunk. These ABI
+  // bounds keep the two chunk arrays, grouping nodes, cuDF host owners/views,
+  // descriptor/index vectors and transient per-column vectors inside that
+  // envelope (see docs/embedded-tae-demand.md).
+  static_assert(sizeof(host_tae_representation::column_chunk_info) <= 128);
+  // Flat strings have one offsets child: two input/output column owners and
+  // their views need at most four wrappers of each kind per projected chunk.
+  // The remaining 1024 bytes cover our two chunk arrays and STL descriptors.
+  static_assert(4 * sizeof(cudf::column) + 4 * sizeof(cudf::column_view) + 1024 <=
+                embedding::tae_chunk_metadata_charge);
+  static_assert(sizeof(std::vector<std::size_t>) <= 64);
 
   if (chunks.empty()) {
     auto empty_table = std::make_unique<cudf::table>();
@@ -181,7 +195,8 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   rmm::cuda_set_device_raii target_device_raii(target_device_id);
 
   // 1. Get contiguous host buffer
-  auto const& linear_host = *host_src.get_host_data();
+  auto const& linear_host = host_src.get_host_data();
+  auto const mirror_bytes = host_src.get_size_in_bytes();
 
   // 2. Group chunks by column_idx (ordered by block index within each column)
   //    Each column may have multiple blocks that need to be concatenated.
@@ -219,15 +234,18 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   // 4. Transfer entire host buffer to GPU in a single contiguous copy.
   //    This replaces per-chunk H→D copies, reducing driver overhead and
   //    enabling full PCIe bandwidth utilization.
-  rmm::device_buffer d_mirror(linear_host.size(), stream, mr_ref);
+  rmm::device_buffer d_mirror(mirror_bytes, stream, mr_ref);
 #ifdef SIRIUS_PROFILE
   CUDF_CUDA_TRY(cudaEventRecord(ev_pre_h2d, stream.value()));
 #endif
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_mirror.data(),
-                                linear_host.data(),
-                                linear_host.size(),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  if (auto const& load = host_src.get_device_loader()) {
+    load(d_mirror.data(), mirror_bytes, stream);
+  } else {
+    if (!linear_host || linear_host->size() != mirror_bytes)
+      throw std::runtime_error("TAE contiguous host payload size mismatch");
+    CUDF_CUDA_TRY(cudaMemcpyAsync(
+      d_mirror.data(), linear_host->data(), mirror_bytes, cudaMemcpyHostToDevice, stream.value()));
+  }
 #ifdef SIRIUS_PROFILE
   auto const cvt_h2d = std::chrono::high_resolution_clock::now();
   CUDF_CUDA_TRY(cudaEventRecord(ev_h2d, stream.value()));
@@ -335,6 +353,24 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
     if (status != nvcompSuccess) {
       throw std::runtime_error("nvcompBatchedLZ4DecompressAsync failed: " + std::to_string(status));
     }
+    if (host_src.get_device_loader()) {
+      std::vector<nvcompStatus_t> statuses(num_chunks_to_decompress);
+      std::vector<std::size_t> actual_sizes(num_chunks_to_decompress);
+      CUDF_CUDA_TRY(cudaMemcpyAsync(statuses.data(),
+                                    d_statuses.data(),
+                                    statuses.size() * sizeof(nvcompStatus_t),
+                                    cudaMemcpyDeviceToHost,
+                                    stream.value()));
+      CUDF_CUDA_TRY(cudaMemcpyAsync(actual_sizes.data(),
+                                    d_decomp_actual_sizes.data(),
+                                    actual_sizes.size() * sizeof(std::size_t),
+                                    cudaMemcpyDeviceToHost,
+                                    stream.value()));
+      stream.synchronize();
+      for (std::size_t i = 0; i < statuses.size(); ++i)
+        if (statuses[i] != nvcompSuccess || actual_sizes[i] != h_decomp_buf_sizes[i])
+          throw std::runtime_error("TAE LZ4 chunk failed its declared decoded size");
+    }
 
 #ifdef SIRIUS_PROFILE
     SIRIUS_LOG_INFO(
@@ -407,7 +443,8 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
         auto d_size              = get_chunk_decompressed_size(cr.chunk_index);
         uint32_t actual_data_len = chunk.row_count * VARLENA_STRUCT_SIZE;
 
-        if (chunk.vector_header_size + actual_data_len > d_size) {
+        if (std::size_t(chunk.row_count) * VARLENA_STRUCT_SIZE != actual_data_len ||
+            std::size_t(chunk.vector_header_size) + actual_data_len + 4 > d_size) {
           throw std::runtime_error("varchar varlena section exceeds decompressed buffer");
         }
 
@@ -417,6 +454,34 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
                           actual_data_len,
                           0,
                           cr.chunk_index});
+      }
+
+      if (host_src.get_device_loader()) {
+        rmm::device_uvector<std::uint64_t> validation(2, stream, mr_ref);
+        CUDF_CUDA_TRY(
+          cudaMemsetAsync(validation.data(), 0, 2 * sizeof(std::uint64_t), stream.value()));
+        std::size_t char_bound = 0;
+        for (auto const& block : blocks) {
+          auto const& chunk  = chunks[block.chunk_index];
+          auto const decoded = get_chunk_decompressed_size(block.chunk_index);
+          char_bound += decoded;
+          cuda::tae::validate_varchar_layout(
+            block.d_data,
+            block.d_area - 4,
+            block.rows,
+            decoded - chunk.vector_header_size - block.actual_data_len - 4,
+            validation.data(),
+            stream);
+        }
+        std::uint64_t check[2]{};
+        CUDF_CUDA_TRY(cudaMemcpyAsync(
+          check, validation.data(), sizeof(check), cudaMemcpyDeviceToHost, stream.value()));
+        stream.synchronize();
+        if (check[1])
+          throw std::runtime_error("TAE varlena references exceed their serialized area");
+        if (check[0] > char_bound || check[0] > std::numeric_limits<std::int32_t>::max())
+          throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED,
+                                   "TAE string expansion exceeds metadata reservation bound");
       }
 
       // Decode offsets per block and read each block's exact char count before
@@ -429,6 +494,10 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
       std::size_t max_temp_bytes = 0;
       cuda::tae::decode_varchar_offsets(
         nullptr, nullptr, nullptr, nullptr, max_temp_bytes, max_block_rows, stream);
+      if (host_src.get_device_loader() &&
+          max_temp_bytes > (std::size_t(max_block_rows) + 1) * 32 + (1u << 20))
+        throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED,
+                                 "TAE string scratch exceeds metadata reservation bound");
       rmm::device_buffer d_temp(max_temp_bytes, stream, mr_ref);
 
       std::vector<int32_t> block_char_counts(blocks.size());
@@ -460,12 +529,25 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
       }
       stream.synchronize();
 
-      std::size_t total_chars = 0;
+      std::size_t total_chars   = 0;
+      std::size_t bounded_chars = 0;
+      for (auto const& cr : chunk_refs)
+        bounded_chars += get_chunk_decompressed_size(cr.chunk_index);
       std::vector<std::size_t> block_char_offsets(blocks.size());
       for (std::size_t i = 0; i < blocks.size(); ++i) {
+        if (block_char_counts[i] < 0 ||
+            static_cast<std::size_t>(block_char_counts[i]) >
+              static_cast<std::size_t>(std::numeric_limits<int32_t>::max()) - total_chars)
+          throw std::runtime_error("TAE string column exceeds cuDF offset range");
         block_char_offsets[i] = total_chars;
         total_chars += static_cast<std::size_t>(block_char_counts[i]);
       }
+      // The metadata-only reservation bounds strings by their serialized
+      // vectors. Repeated/overlapping area references can amplify that size;
+      // reject that encoding before allocating outside the admitted floor.
+      if (host_src.get_device_loader() && total_chars > bounded_chars)
+        throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED,
+                                 "TAE string expansion exceeds metadata reservation bound");
 
       auto chars_buf = rmm::device_buffer(total_chars, stream, mr_ref);
       row_offset     = 0;
@@ -506,14 +588,19 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
         for (auto& block : blocks) {
           auto& chunk = chunks[block.chunk_index];
           if (chunk.null_cnt > 0) {
-            auto* d_src_blk = chunk_device_ptrs[block.chunk_index];
-            uint32_t nsp_bitmap_offset =
-              chunk.vector_header_size + block.actual_data_len + 4 + block.area_len + 4 + 24;
+            auto* d_src_blk               = chunk_device_ptrs[block.chunk_index];
+            std::size_t nsp_bitmap_offset = std::size_t(chunk.vector_header_size) +
+                                            block.actual_data_len + 4 + block.area_len + 4 + 24;
+            auto const decoded    = get_chunk_decompressed_size(block.chunk_index);
+            auto const mask_bytes = (std::size_t(block.rows) + 31) / 32 * 4;
+            if (nsp_bitmap_offset > decoded || mask_bytes > decoded - nsp_bitmap_offset)
+              throw std::runtime_error("TAE string null bitmap exceeds serialized chunk");
             auto* d_validity = static_cast<uint32_t*>(null_mask.data());
-            cuda::tae::invert_null_mask(d_src_blk + nsp_bitmap_offset,
-                                        d_validity + (bitmask_row_offset / 32),
-                                        block.rows,
-                                        stream);
+            cuda::tae::invert_null_mask_at(d_src_blk + nsp_bitmap_offset,
+                                           d_validity,
+                                           block.rows,
+                                           static_cast<uint32_t>(bitmask_row_offset),
+                                           stream);
           }
           bitmask_row_offset += block.rows;
         }
@@ -549,6 +636,9 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
       std::size_t row_offset  = 0;
       for (auto& cr : chunk_refs) {
         auto& chunk = chunks[cr.chunk_index];
+        if (std::size_t(chunk.vector_header_size) + std::size_t(chunk.row_count) * elem_size >
+            get_chunk_decompressed_size(cr.chunk_index))
+          throw std::runtime_error("TAE fixed-width rows exceed the serialized chunk");
         h_descs.push_back({chunk_device_ptrs[cr.chunk_index] + chunk.vector_header_size,
                            chunk.row_count,
                            static_cast<uint32_t>(row_offset)});
@@ -592,12 +682,17 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
             bitmask_row_offset += chunk.row_count;
             continue;
           }
-          auto* d_src                = chunk_device_ptrs[cr.chunk_index];
-          uint32_t data_len          = chunk.row_count * elem_size;
-          uint32_t nsp_bitmap_offset = chunk.vector_header_size + data_len + 4 + 0 + 4 + 24;
+          auto* d_src       = chunk_device_ptrs[cr.chunk_index];
+          uint32_t data_len = chunk.row_count * elem_size;
+          std::size_t nsp_bitmap_offset =
+            std::size_t(chunk.vector_header_size) + data_len + 4 + 4 + 24;
+          auto const decoded    = get_chunk_decompressed_size(cr.chunk_index);
+          auto const mask_bytes = (std::size_t(chunk.row_count) + 31) / 32 * 4;
+          if (nsp_bitmap_offset > decoded || mask_bytes > decoded - nsp_bitmap_offset)
+            throw std::runtime_error("TAE fixed null bitmap exceeds serialized chunk");
           h_null_descs.push_back({d_src + nsp_bitmap_offset,
                                   chunk.row_count,
-                                  static_cast<uint32_t>(bitmask_row_offset / 32)});
+                                  static_cast<uint32_t>(bitmask_row_offset)});
           bitmask_row_offset += chunk.row_count;
         }
 
@@ -730,7 +825,7 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
     ms(cvt_filter_apply, cvt_proj),
     ms(cvt_proj, cvt_end),
     ms(cvt_t0, cvt_end),
-    linear_host.size());
+    mirror_bytes);
   SIRIUS_LOG_INFO(
     "[tae_converter] GPU  timing: xfer={:.2f}ms lz4={:.2f}ms decode={:.2f}ms "
     "filter={:.2f}ms apply={:.2f}ms tail={:.2f}ms total={:.2f}ms",
@@ -756,6 +851,55 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
 }
 
 }  // namespace detail
+
+std::size_t tae_decode_reservation_floor(
+  std::vector<host_tae_representation::column_chunk_info> const& chunks)
+{
+  auto add = [](std::size_t a, std::size_t b) {
+    if (b > std::numeric_limits<std::size_t>::max() - a)
+      throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE GPU peak overflow");
+    return a + b;
+  };
+  auto mul = [](std::size_t a, std::size_t b) {
+    if (b && a > std::numeric_limits<std::size_t>::max() / b)
+      throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE GPU peak overflow");
+    return a * b;
+  };
+  std::size_t mirror = 0, decompressed = 0, output = 0, compressed_count = 0, max_chunk = 0;
+  std::size_t row_scratch = 0;
+  for (auto const& c : chunks) {
+    mirror             = add(mirror, c.pinned_length);
+    auto const decoded = c.extent.is_compressed() ? c.extent.origin_size : c.pinned_length;
+    if (c.extent.is_compressed()) {
+      decompressed = add(decompressed, decoded);
+      max_chunk    = std::max(max_chunk, decoded);
+      ++compressed_count;
+    }
+    // Largest supported fixed carrier is DECIMAL128 (16 bytes). Strings
+    // additionally need offsets plus chars, bounded at decode by serialized
+    // bytes. Masks and alignment are charged even when null_cnt is zero.
+    output = add(
+      output, add(std::max(decoded, mul(c.row_count, 16)), add(mul(add(c.row_count, 1), 4), 256)));
+    row_scratch = add(row_scratch, mul(add(c.row_count, 1), 32));
+  }
+  std::size_t nvcomp_scratch = 0;
+  if (compressed_count) {
+    auto const status =
+      nvcompBatchedLZ4DecompressGetTempSizeAsync(compressed_count,
+                                                 max_chunk,
+                                                 nvcompBatchedLZ4DecompressDefaultOpts,
+                                                 &nvcomp_scratch,
+                                                 decompressed);
+    if (status != nvcompSuccess)
+      throw std::runtime_error("TAE nvCOMP reservation scratch query failed");
+  }
+  // Cover all simultaneous owners, including a filter/gather output, selection
+  // vectors, CUB block-scan scratch, device descriptors and allocation padding.
+  // At execution the CUB query is checked against this row-scratch allowance.
+  return add(add(mirror, decompressed),
+             add(add(nvcomp_scratch, mul(output, 2)),
+                 add(row_scratch, add(mul(chunks.size(), 512), 1u << 20))));
+}
 
 // ---------------------------------------------------------------------------
 // Public registration

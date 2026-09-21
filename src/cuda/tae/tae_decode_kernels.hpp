@@ -128,6 +128,16 @@ void decode_varchar(const uint8_t* d_varlena_base,
  */
 void adjust_offsets(int32_t* d_offsets, int32_t base, uint32_t count, rmm::cuda_stream_view stream);
 
+// Before the int32 prefix sum, validate out-of-line references and accumulate
+// characters in uint64. result[0] is the total, result[1] is an invalid flag;
+// caller zeroes the two words and may accumulate several blocks into them.
+void validate_varchar_layout(const uint8_t* d_varlena,
+                             const uint8_t* d_area_length,
+                             uint32_t rows,
+                             std::size_t available_area,
+                             uint64_t* result,
+                             rmm::cuda_stream_view stream);
+
 /**
  * @brief Invert a MO null bitmap to cuDF validity bitmask.
  *
@@ -145,6 +155,14 @@ void invert_null_mask(const uint8_t* d_src,
                       uint32_t n_rows,
                       rmm::cuda_stream_view stream);
 
+// The destination is ALL_VALID; clears this block's null bits at an arbitrary
+// row offset, preserving neighboring blocks that share a destination word.
+void invert_null_mask_at(const uint8_t* d_src,
+                         uint32_t* d_dst,
+                         uint32_t n_rows,
+                         uint32_t row_offset,
+                         rmm::cuda_stream_view stream);
+
 // ---------------------------------------------------------------------------
 // Batched decode descriptors — one per block (TAE object has many blocks).
 // Used by 2D-grid batched kernels (blockIdx.y = descriptor index) to replace
@@ -160,9 +178,9 @@ struct BatchedFixedDesc {
 
 /// Block descriptor for batched null mask inversion.
 struct BatchedNullMaskDesc {
-  const uint8_t* src;            ///< Device pointer to MO null bitmap.
-  uint32_t n_rows;               ///< Number of rows in this block.
-  uint32_t bitmask_word_offset;  ///< Word offset in the output cuDF validity mask.
+  const uint8_t* src;           ///< Device pointer to MO null bitmap.
+  uint32_t n_rows;              ///< Number of rows in this block.
+  uint32_t bitmask_row_offset;  ///< Exact row offset, including partial words.
 };
 
 /**

@@ -425,6 +425,31 @@ TEST_CASE("multi_index try_pop_if scoped to a device bucket", "[multi_index_prio
 
 // =============================================================================
 // mutable_pop_if -- mutable predicate, directional scan (used by the downgrade path)
+
+TEST_CASE("device admission bypasses blocked work without inspecting another device",
+          "[multi_index_priority_queue]")
+{
+  multi_index_priority_queue<payload> q(by_keys());
+  q.push(task(1, keys_of(1, SiriusPhysicalOperatorType::FILTER, 7, 0)));
+  q.push(task(2, keys_of(2, SiriusPhysicalOperatorType::FILTER, 7, 0)));
+  q.push(task(3, keys_of(0, SiriusPhysicalOperatorType::FILTER, 9, 1)));
+  std::vector<int> inspected;
+  auto ready = q.mutable_pop_if(gpu_index{0}, [&](payload& value) {
+    inspected.push_back(value.id);
+    return value.id == 2;
+  });
+  REQUIRE(ready);
+  CHECK((*ready)->id == 2);
+  CHECK(inspected == std::vector<int>{1, 2});
+  CHECK(q.size(query_index{7}) == 1);
+  CHECK(q.size(gpu_index{1}) == 1);
+  // Blocked work remains in the original queue and participates in query drain.
+  q.drain(query_index{7});
+  CHECK(q.size(gpu_index{0}) == 0);
+  auto other = q.try_pop();
+  REQUIRE(other);
+  CHECK((*other)->id == 3);
+}
 // =============================================================================
 
 TEST_CASE("multi_index mutable_pop_if scans in the requested direction",
