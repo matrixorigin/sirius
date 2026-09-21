@@ -115,6 +115,11 @@ std::string copy_text(const char* data, std::size_t bytes, std::size_t limit, co
   if (result.find('\0') != std::string::npos) throw failure(SIRIUS_INVALID_ARGUMENT, message);
   return result;
 }
+std::string copy_opaque(const char* data, std::size_t bytes, std::size_t limit, const char* message)
+{
+  if ((!data && bytes) || bytes > limit) throw failure(SIRIUS_INVALID_ARGUMENT, message);
+  return std::string(data ? data : "", bytes);
+}
 owned_column copy_column(sirius_column const& c, std::size_t& bytes)
 {
   if (c.reserved || c.nullable > 1) throw failure(SIRIUS_INVALID_ARGUMENT, "invalid column");
@@ -156,8 +161,8 @@ void engine_control::bind_query(std::shared_ptr<query_state> const& q,
     throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native metadata capacity reached");
   auto owned        = std::make_unique<owned_query_contract>();
   owned->account_id = contract.account_id;
-  owned->query_id =
-    copy_text(contract.query_id, contract.query_id_bytes, 4096, "invalid native query identifier");
+  owned->query_id   = copy_opaque(
+    contract.query_id, contract.query_id_bytes, 4096, "invalid native query identifier");
   std::copy(
     std::begin(contract.snapshot_ts), std::end(contract.snapshot_ts), owned->snapshot_ts.begin());
   std::size_t actual_charge = sizeof(owned_query_contract) + owned->query_id.size();

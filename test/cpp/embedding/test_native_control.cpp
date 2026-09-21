@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <future>
 #include <latch>
@@ -196,6 +197,55 @@ TEST_CASE("native contracts synchronously copy bounded descriptors", "[native_co
   column_name[0] = 'X';
   CHECK(q->bindings[0].columns[0].logical.name == "c");
   REQUIRE_THROWS_AS(f.control.register_read(q, read), failure);
+}
+
+TEST_CASE("native query identity is an owned opaque byte string", "[native_control]")
+{
+  fixture f;
+  auto q = f.create();
+  char query_id[]{'\0', 'q', '\0', 'i', '\0'};
+  const std::string expected(query_id, sizeof(query_id));
+  sirius_query_contract contract{
+    sizeof(contract), SIRIUS_ABI_VERSION, 7, 0, query_id, sizeof(query_id), {0}, nullptr, 0};
+
+  f.control.bind_query(q, contract);
+  std::fill(std::begin(query_id), std::end(query_id), 'X');
+
+  REQUIRE(q->contract->query_id.size() == expected.size());
+  CHECK(q->contract->query_id == expected);
+}
+
+TEST_CASE("native query identity retains its nonempty bounded contract", "[native_control]")
+{
+  fixture f;
+  const char query_id = 'q';
+  sirius_query_contract contract{
+    sizeof(contract), SIRIUS_ABI_VERSION, 7, 0, &query_id, 0, {0}, nullptr, 0};
+
+  auto empty = f.create();
+  REQUIRE_THROWS_AS(f.control.bind_query(empty, contract), failure);
+
+  contract.query_id_bytes = 4097;
+  auto oversized          = f.create();
+  REQUIRE_THROWS_AS(f.control.bind_query(oversized, contract), failure);
+
+  contract.query_id       = nullptr;
+  contract.query_id_bytes = 1;
+  auto missing            = f.create();
+  REQUIRE_THROWS_AS(f.control.bind_query(missing, contract), failure);
+}
+
+TEST_CASE("native text fields still reject embedded NUL bytes", "[native_control]")
+{
+  fixture f;
+  auto q              = f.create();
+  const char query_id = 'q';
+  const char output_name[]{'o', '\0', 'u'};
+  sirius_column output{23, 0, 0, 0, output_name, sizeof(output_name), 0};
+  sirius_query_contract contract{
+    sizeof(contract), SIRIUS_ABI_VERSION, 7, 0, &query_id, 1, {0}, &output, 1};
+
+  REQUIRE_THROWS_AS(f.control.bind_query(q, contract), failure);
 }
 
 TEST_CASE("native queued cancellation bypasses blocked active execution", "[native_control]")

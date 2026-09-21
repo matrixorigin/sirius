@@ -56,6 +56,12 @@ version. Create output handles must initially be NULL; a rejected create never
 overwrites a live handle. Error storage is caller-owned and overwritten per
 call; there is no shared last-error string.
 
+The query contract's `query_id` is a length-delimited opaque identity, not C
+text. `sirius_query_bind` copies exactly `query_id_bytes` (1 through 4096),
+including leading, interior, or trailing NUL bytes, so the caller may release or
+reuse its buffer after the call returns. Names, paths, and other actual text
+fields remain length-delimited text and reject embedded NUL bytes.
+
 Engine creation requires an explicit configuration path. The native worker
 override defaults to two; values 1 through 128 are accepted. One native GPU
 runtime owns the process at a time. A second native runtime cannot replace its
