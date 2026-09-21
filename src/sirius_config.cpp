@@ -440,6 +440,16 @@ static void from_yaml(const YAML::Node& node, telemetry_config& opt)
   r.reject_unknown();
 }
 
+static void from_yaml(const YAML::Node& node, embedding_config& opt)
+{
+  yaml::reader r(node, "embedding");
+  r.optional("metadata_capacity_bytes", yaml::bytes(opt.metadata_capacity_bytes));
+  r.optional("tae_host_staging_bytes", yaml::bytes(opt.tae_host_staging_bytes));
+  if (opt.metadata_capacity_bytes == 0 || opt.tae_host_staging_bytes == 0)
+    throw std::runtime_error("embedding capacities must be greater than zero");
+  r.reject_unknown();
+}
+
 static void from_yaml(const YAML::Node& node, compression_config& opt)
 {
   yaml::reader r(node, "compression");
@@ -856,6 +866,8 @@ try {
   // Telemetry
   if (auto n = r.optional_node("telemetry")) { sirius::from_yaml(*n, settings._telemetry_config); }
 
+  if (auto n = r.optional_node("embedding")) { sirius::from_yaml(*n, settings._embedding_config); }
+
   // Compression
   if (auto n = r.optional_node("compression")) {
     sirius::from_yaml(*n, settings._compression_config);
@@ -1073,3 +1085,8 @@ void sirius_config::set_object_store_config(io::object_store_config config) noex
 }
 
 }  // namespace sirius
+
+namespace sirius {
+const embedding_config& parsed_sirius_config::get_embedding_config() const noexcept
+{ return impl_->settings.get_embedding_config(); }
+}

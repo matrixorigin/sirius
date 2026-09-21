@@ -156,6 +156,26 @@ extern "C" sirius_status sirius_query_prepare(sirius_query_handle* query,
     return query->control->prepare(query->state, std::chrono::milliseconds(wait_ms));
   });
 }
+extern "C" sirius_status sirius_query_bind(sirius_query_handle* query,
+                                           const sirius_query_contract* contract,
+                                           sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query && contract, "missing query or query contract");
+    query->control->bind_query(query->state, *contract);
+    return {};
+  });
+}
+extern "C" sirius_status sirius_read_register(sirius_query_handle* query,
+                                              const sirius_read_binding* binding,
+                                              sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query && binding, "missing query or read binding");
+    query->control->register_read(query->state, *binding);
+    return {};
+  });
+}
 extern "C" sirius_status sirius_query_start(sirius_query_handle* query, sirius_error* error)
 {
   return boundary(error, [&]() -> sirius_error {

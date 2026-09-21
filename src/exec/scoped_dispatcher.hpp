@@ -81,6 +81,21 @@ class scoped_dispatcher {
     }
   }
 
+  // Non-blocking bounded submission. Unlike enqueue(), a full dispatcher does
+  // not retain the callable: the producer remains its owner and can retry only
+  // after its own durable wakeup. This is the primitive used by live embedded
+  // scans, where a pending queue would defeat source back-pressure.
+  bool try_schedule(scoped_dispatcher_task auto&& f)
+  {
+    auto task = wrap(std::forward<decltype(f)>(f));
+    std::unique_lock lk(mu_);
+    if (stop_.stop_requested() || inflight_ == max_inflight_) return false;
+    ++inflight_;
+    lk.unlock();
+    pool_.schedule(std::move(task));
+    return true;
+  }
+
   // @brief Blocking. Waits for an inflight slot, then submits directly to the pool.
   // Bypasses the pending queue — this is the producer-side back-pressure path.
   // Returns false iff request_stop() was observed while waiting (or already set).

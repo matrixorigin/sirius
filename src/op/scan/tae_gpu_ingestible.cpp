@@ -10,6 +10,7 @@
 
 #include <cucascade/cudf/gpu_data_representation.hpp>
 #include <data/sirius_converter_registry.hpp>
+#include <embedding/control.hpp>
 #include <expression/ast/from_duckdb.hpp>
 #include <expression_evaluator/expression_evaluator.hpp>
 #include <io/sirius_datasource.hpp>
@@ -264,25 +265,50 @@ std::unique_ptr<batch_coalescer> tae_gpu_ingestible::create_batch_coalescer() co
 
 bool tae_gpu_ingestible::has_processed_all_metadata() const
 {
-  return _next_object.load(std::memory_order_relaxed) >= _info->bind_data->objects.size();
+  if (_metadata_stop.stop_requested()) return true;
+  std::lock_guard lock(_work_mutex);
+  return _next_object >= _info->bind_data->objects.size();
 }
+
+void tae_gpu_ingestible::stop_metadata_scan() noexcept { _metadata_stop.request_stop(); }
 
 gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
   io::ioctx_resolver resolve)
 {
   if (!resolve) { throw std::runtime_error("TAE ingestible has no scan-manager I/O resolver"); }
-  auto const object_index = _next_object.fetch_add(1, std::memory_order_relaxed);
-  if (object_index >= _info->bind_data->objects.size()) { return nullptr; }
+  if (_metadata_stop.stop_requested()) return nullptr;
+  std::size_t object_index, block_index;
+  {
+    std::lock_guard lock(_work_mutex);
+    if (!_info->bind_data->embedded_manifest) {
+      if (_next_object >= _info->bind_data->objects.size()) return nullptr;
+      object_index = _next_object++;
+      block_index  = std::numeric_limits<std::size_t>::max();
+    } else {
+      while (_next_object < _info->bind_data->objects.size() &&
+             _next_block >= _info->bind_data->objects[_next_object].blocks) {
+        ++_next_object;
+        _next_block = 0;
+      }
+      if (_next_object >= _info->bind_data->objects.size()) return nullptr;
+      object_index = _next_object;
+      block_index  = _next_block++;
+    }
+  }
   auto const file_path =
     _info->bind_data->data_dir + "/" + _info->bind_data->objects[object_index].file_path;
   auto io_ctx = resolve(file_path);
-  return
-    [this, object_index, io_ctx = std::move(io_ctx)] { return load_object(object_index, io_ctx); };
+  return [this, object_index, block_index, io_ctx = std::move(io_ctx)] {
+    return load_object(object_index, block_index, io_ctx);
+  };
 }
 
 std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
-  std::size_t object_index, std::shared_ptr<io::sirius_ioctx> const& io_ctx) const
+  std::size_t object_index,
+  std::size_t block_index,
+  std::shared_ptr<io::sirius_ioctx> const& io_ctx) const
 {
+  if (_metadata_stop.stop_requested()) return std::make_unique<tae_scan_info>();
   auto const& object   = _info->bind_data->objects.at(object_index);
   auto const file_path = _info->bind_data->data_dir + "/" + object.file_path;
   if (!io_ctx) { throw std::runtime_error("TAE ingestible received a null I/O context"); }
@@ -314,15 +340,31 @@ std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
   tae::ParseMetadata(metadata.data() + tae::IO_ENTRY_HEADER_LEN,
                      static_cast<std::uint32_t>(metadata.size() - tae::IO_ENTRY_HEADER_LEN),
                      object_metadata);
+  if (object_metadata.block_count != object.blocks)
+    throw std::runtime_error("TAE manifest block count does not match object metadata");
+  std::uint64_t object_rows = 0;
+  for (auto const& block : object_metadata.blocks) {
+    if (block.rows > std::numeric_limits<std::uint64_t>::max() - object_rows)
+      throw std::runtime_error("TAE object row count overflow");
+    object_rows += block.rows;
+  }
+  if (object_rows != object.rows)
+    throw std::runtime_error("TAE manifest row count does not match object metadata");
+  bool const whole_object = block_index == std::numeric_limits<std::size_t>::max();
+  if (!whole_object && block_index >= object_metadata.block_count)
+    throw std::runtime_error("TAE manifest block count exceeds object metadata");
 
   std::vector<planned_read> reads;
   std::size_t selected_rows = 0;
-  for (std::uint32_t block_index = 0; block_index < object_metadata.block_count; ++block_index) {
-    auto const& block = object_metadata.blocks[block_index];
+  auto const block_begin    = whole_object ? 0u : static_cast<std::uint32_t>(block_index);
+  auto const block_end      = whole_object ? object_metadata.block_count : block_begin + 1;
+  for (std::uint32_t current_block = block_begin; current_block < block_end; ++current_block) {
+    auto const& block = object_metadata.blocks[current_block];
     bool passes       = true;
     for (auto const sequence : _plan.filter_seqnums) {
-      if (sequence < block.columns.size() &&
-          !tae::ZoneMapPassesFilters(
+      if (sequence >= block.columns.size())
+        throw std::runtime_error("TAE object is missing a filtered column sequence");
+      if (!tae::ZoneMapPassesFilters(
             _plan.pushed_filters, block.columns[sequence].zone_map, sequence)) {
         passes = false;
         break;
@@ -332,7 +374,8 @@ std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
 
     selected_rows += block.rows;
     for (auto const& projected : _plan.projected_columns) {
-      if (projected.seqnum >= block.columns.size()) { continue; }
+      if (projected.seqnum >= block.columns.size())
+        throw std::runtime_error("TAE object is missing a projected column sequence");
       auto const& column = block.columns[projected.seqnum];
       auto const& extent = column.location;
       reads.push_back({extent.offset,
@@ -353,8 +396,25 @@ std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
   if (reads.empty() || selected_rows == 0) { return result; }
 
   for (auto const& read : reads) {
+    if (read.compressed_length >
+          std::numeric_limits<std::size_t>::max() - result->compressed_bytes ||
+        read.origin_size > std::numeric_limits<std::size_t>::max() - result->uncompressed_bytes)
+      throw sirius::embedding::failure(SIRIUS_RESOURCE_EXHAUSTED, "TAE split size overflow");
     result->compressed_bytes += read.compressed_length;
     result->uncompressed_bytes += read.origin_size;
+  }
+  if (_info->bind_data->embedded_host_budget && result->compressed_bytes) {
+    auto credit = std::make_shared<sirius::embedding::buffer_budget::lease>();
+    auto status = _info->bind_data->embedded_host_budget->acquire(
+      result->compressed_bytes,
+      _metadata_stop.get_token(),
+      sirius::embedding::buffer_budget::clock::time_point::max(),
+      *credit);
+    if (status != SIRIUS_OK) {
+      if (_metadata_stop.stop_requested()) return std::make_unique<tae_scan_info>();
+      throw sirius::embedding::failure(status, "embedded TAE host staging is unavailable");
+    }
+    result->host_credit = std::move(credit);
   }
   auto host               = std::make_shared<pinned_host_buffer>(result->compressed_bytes);
   std::size_t host_offset = 0;
@@ -489,7 +549,7 @@ std::vector<std::size_t> tae_gpu_ingestible::materialized_column_order() const
   std::vector<std::size_t> order;
   order.reserve(_plan.projected_columns.size());
   for (auto const& column : _plan.projected_columns) {
-    order.push_back(column.seqnum);
+    order.push_back(column.logical_idx);
   }
   return order;
 }

@@ -39,6 +39,8 @@
 #include "expression/ast/utils.hpp"
 #include "helper/type_conversions.hpp"
 #include "io/s3/duckdb_secret_config.hpp"
+#include "embedding/native_gpu.hpp"
+#include "embedding/plan_bindings.hpp"
 #include "io/uri_parser.hpp"
 #include "log/logging.hpp"
 #include "op/dynamic_filter/sirius_dynamic_filter.hpp"

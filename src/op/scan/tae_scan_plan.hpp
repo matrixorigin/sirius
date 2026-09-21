@@ -74,6 +74,7 @@ struct tae_scan_plan {
   //===-------------------------------------------------------------------===//
   std::vector<std::string> all_col_names;
   std::vector<std::uint8_t> all_col_mo_oids;
+  std::vector<std::uint16_t> logical_to_seqnum;
   std::int32_t sort_column_idx = -1;
 
   //===-------------------------------------------------------------------===//
@@ -88,7 +89,8 @@ struct tae_scan_plan {
   // @c host_tae_representation::column_chunk_info::column_idx today.
   //===-------------------------------------------------------------------===//
   struct projected_column {
-    std::uint16_t seqnum;            ///< P — TAE seqnum (== primary_idx)
+    std::uint16_t seqnum;            ///< Physical TAE column sequence number
+    std::uint16_t logical_idx;       ///< DuckDB table column index used by cache bindings
     std::uint16_t col_ids_position;  ///< C — written into chunk.column_idx
     tae::MOTypeOid type_oid;         ///< pre-resolved from all_col_mo_oids[seqnum]
     std::int32_t width = 0;          ///< decimal precision (0 if not decimal)

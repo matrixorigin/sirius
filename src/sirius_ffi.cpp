@@ -34,6 +34,10 @@
 #include "duckdb/parser/statement/relation_statement.hpp"  // duckdb::RelationStatement
 #include "duckdb/planner/planner.hpp"                      // duckdb::Planner
 #include "exec/arrow_result_stream.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "embedding/control.hpp"
+#include "embedding/input.hpp"
+#include "embedding/plan_bindings.hpp"
 #include "exec/stream_bind_catalog.hpp"   // sirius::exec::stream_bind_catalog
 #include "exec/stream_plan_bindings.hpp"  // sirius::exec::register_stream_source_function
 #include "exec/streaming_fragment.hpp"    // sirius::exec::streaming_fragment, fragment_spec
@@ -48,6 +52,11 @@
 
 #include <chrono>
 #include <cstdlib>
+#include "sirius_interface.hpp"
+#include "substrait/plan.pb.h"
+#include "tae_types.hpp"
+#include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -161,10 +170,17 @@ struct Context::Impl {
   duckdb::unique_ptr<duckdb::Connection> conn;
   // Serializes transactions on `conn`; see in_transaction().
   std::mutex conn_mutex;
+  //! stream_bind_catalog: also in registered_state; held here past registered_state resets.
+  duckdb::shared_ptr<sirius::exec::stream_bind_catalog> stream_catalog;
+  duckdb::shared_ptr<sirius::embedding::embedded_bind_catalog> embedded_catalog;
+  std::size_t embedded_metadata_capacity{256u << 20};
+  std::size_t embedded_tae_host_staging{64u << 20};
 
   void bring_up(const sirius::parsed_sirius_config& config)
   {
     install_log_sink_from_env();
+    embedded_metadata_capacity = config.get_embedding_config().metadata_capacity_bytes;
+    embedded_tae_host_staging = config.get_embedding_config().tae_host_staging_bytes;
     context = duckdb::make_shared_ptr<duckdb::SiriusContext>();
     context->initialize(config);
 
@@ -200,6 +216,10 @@ struct Context::Impl {
     client.registered_state->Insert(sirius::exec::stream_bind_catalog::kStateKey,
                                     duckdb::make_shared_ptr<sirius::exec::stream_bind_catalog>());
     sirius::exec::register_stream_source_function(*db->instance);
+    embedded_catalog = duckdb::make_shared_ptr<sirius::embedding::embedded_bind_catalog>();
+    client.registered_state->Insert(sirius::embedding::embedded_bind_catalog::key,
+                                    embedded_catalog);
+    sirius::embedding::register_embedded_read_functions(*db->instance);
     duckdb::Settings::Set<duckdb::EnableOptimizerSetting>(
       client, duckdb::SetScope::LOCAL, duckdb::Value::BOOLEAN(true));
     auto& disabled = duckdb::DBConfig::GetConfig(client).options.disabled_optimizers;
@@ -232,6 +252,205 @@ Context::Context(const std::string& config_path) : impl_(std::make_unique<Impl>(
 // Defined here, where the heavy types are complete: destroying `impl_` tears down
 // the embedded DuckDB and the initialized engine.
 Context::~Context() = default;
+std::size_t Context::embedded_metadata_capacity_bytes() const noexcept
+{
+  return impl_->embedded_metadata_capacity;
+}
+std::size_t Context::embedded_tae_host_staging_bytes() const noexcept
+{
+  return impl_->embedded_tae_host_staging;
+}
+
+struct EmbeddedPrepared::Impl {
+  Context::Impl* context{};
+  duckdb::shared_ptr<sirius::sirius_prepared_statement_data> plan;
+  std::vector<std::string> views;
+  bool cleaned{false};
+
+  void finish()
+  {
+    if (cleaned) return;
+    plan.reset();
+    auto& conn = *context->conn;
+    try {
+      conn.BeginTransaction();
+      for (auto const& name : views) {
+        duckdb::DropInfo drop;
+        drop.type         = duckdb::CatalogType::VIEW_ENTRY;
+        drop.catalog      = TEMP_CATALOG;
+        drop.schema       = DEFAULT_SCHEMA;
+        drop.name         = name;
+        drop.if_not_found = duckdb::OnEntryNotFound::RETURN_NULL;
+        duckdb::Catalog::GetCatalog(*conn.context, TEMP_CATALOG).DropEntry(*conn.context, drop);
+      }
+      conn.Commit();
+      context->embedded_catalog->clear();
+      cleaned = true;
+    } catch (...) {
+      try {
+        conn.Rollback();
+      } catch (...) {
+      }
+      context->embedded_catalog->clear();
+      throw;
+    }
+  }
+
+  ~Impl()
+  {
+    try {
+      finish();
+    } catch (...) {
+      context->embedded_catalog->clear();
+    }
+  }
+};
+EmbeddedPrepared::EmbeddedPrepared(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+EmbeddedPrepared::~EmbeddedPrepared() = default;
+void EmbeddedPrepared::finish() { impl_->finish(); }
+
+namespace {
+std::atomic<uint64_t> embedded_generation{1};
+duckdb::LogicalType embedded_type(sirius::embedding::owned_column const& column)
+{
+  tae::MOType type{};
+  type.oid   = static_cast<uint8_t>(column.oid);
+  type.width = column.width;
+  type.scale = column.scale;
+  return tae::MOTypeToDuckDB(type);
+}
+
+std::string embedded_view_name(uint64_t generation, uint64_t binding_id)
+{
+  return "sirius_embedded_g" + std::to_string(generation) + "_b" + std::to_string(binding_id);
+}
+
+std::string rewrite_embedded_reads(std::string const& bytes, uint64_t generation)
+{
+  substrait::Plan plan;
+  if (!plan.ParseFromString(bytes)) throw std::runtime_error("invalid serialized Substrait plan");
+  std::function<void(duckdb::google::protobuf::Message*)> visit;
+  visit = [&](duckdb::google::protobuf::Message* message) {
+    if (message->GetDescriptor()->full_name() == "substrait.ReadRel") {
+      auto* read = static_cast<substrait::ReadRel*>(message);
+      if (read->has_named_table() && read->named_table().names_size() == 2 &&
+          read->named_table().names(0) == "__sirius_embedded_v1") {
+        auto id = static_cast<uint64_t>(std::stoull(read->named_table().names(1)));
+        read->mutable_named_table()->clear_names();
+        read->mutable_named_table()->add_names(embedded_view_name(generation, id));
+      }
+    }
+    auto const* reflection = message->GetReflection();
+    std::vector<const duckdb::google::protobuf::FieldDescriptor*> fields;
+    reflection->ListFields(*message, &fields);
+    for (auto const* field : fields) {
+      if (field->cpp_type() != duckdb::google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) continue;
+      if (field->is_repeated()) {
+        for (int i = 0; i < reflection->FieldSize(*message, field); ++i)
+          visit(reflection->MutableRepeatedMessage(message, field, i));
+      } else {
+        visit(reflection->MutableMessage(message, field));
+      }
+    }
+  };
+  visit(&plan);
+  return plan.SerializeAsString();
+}
+}  // namespace
+
+std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& bytes,
+                                                            embedding::query_state const& query,
+                                                            embedding::input_registry& inputs)
+{
+  impl_->embedded_catalog->clear();
+  auto const generation = embedded_generation.fetch_add(1, std::memory_order_relaxed);
+  auto const has_tae = std::any_of(query.bindings.begin(), query.bindings.end(), [](auto const& b) {
+    return b.source_kind == SIRIUS_READ_TAE;
+  });
+  auto tae_host_budget =
+    has_tae ? std::make_shared<embedding::buffer_budget>(impl_->embedded_tae_host_staging, 128)
+            : nullptr;
+  impl_->conn->BeginTransaction();
+  std::vector<std::string> views;
+  try {
+    for (auto const& read : query.bindings) {
+      embedding::embedded_binding binding;
+      for (auto const& column : read.columns) {
+        binding.names.push_back(column.logical.name);
+        binding.types.push_back(embedded_type(column.logical));
+      }
+      const char* function = nullptr;
+      if (read.source_kind == SIRIUS_READ_MO) {
+        auto found = std::find_if(inputs.reads.begin(), inputs.reads.end(), [&](auto const& input) {
+          return input->id == read.binding_id;
+        });
+        if (found == inputs.reads.end()) throw std::runtime_error("missing MO input binding");
+        binding.input = *found;
+        function      = embedding::embedded_mo_function;
+      } else {
+        auto tae_bind = std::make_shared<tae::TAEScanBindData>();
+        try {
+          tae::ParseManifestBytes(read.manifest, read.data_root, *tae_bind);
+        } catch (std::exception const& e) {
+          throw embedding::failure(SIRIUS_INVALID_ARGUMENT, e.what());
+        }
+        if (tae_bind->db_name != read.database_name || tae_bind->table_name != read.table_name ||
+            tae_bind->all_col_names.size() != read.columns.size())
+          throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
+                                   "TAE manifest identity or schema mismatch");
+        for (std::size_t i = 0; i < read.columns.size(); ++i) {
+          auto const& expected = read.columns[i];
+          if (tae_bind->all_col_names[i] != expected.logical.name ||
+              tae_bind->all_col_mo_oids[i] != expected.logical.oid ||
+              tae_bind->all_col_widths[i] != expected.logical.width ||
+              tae_bind->all_col_scales[i] != expected.logical.scale ||
+              tae_bind->all_col_seqnums[i] != expected.sequence_number)
+            throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
+                                     "TAE manifest column binding mismatch");
+        }
+        tae_bind->embedded_host_budget = tae_host_budget;
+        binding.tae_host_budget        = tae_host_budget;
+        binding.tae                    = std::move(tae_bind);
+        function                       = embedding::embedded_tae_function;
+      }
+      impl_->embedded_catalog->declare(read.binding_id, std::move(binding));
+      auto view_name = embedded_view_name(generation, read.binding_id);
+      auto relation  = impl_->conn->TableFunction(
+        function, {duckdb::Value::BIGINT(static_cast<int64_t>(read.binding_id))});
+      relation->CreateView(view_name, true, true);
+      views.push_back(std::move(view_name));
+    }
+    auto lowered = lower_substrait(*impl_->conn, rewrite_embedded_reads(bytes, generation));
+    if (lowered.prepared->names.size() != query.contract->outputs.size() ||
+        lowered.prepared->types.size() != query.contract->outputs.size())
+      throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
+                               "prepared output schema does not match query contract");
+    for (std::size_t i = 0; i < query.contract->outputs.size(); ++i) {
+      if (lowered.prepared->names[i] != query.contract->outputs[i].name ||
+          lowered.prepared->types[i] != embedded_type(query.contract->outputs[i]))
+        throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
+                                 "prepared output schema does not match query contract");
+    }
+    auto physical = sirius::planner::sirius_physical_plan_generator(*impl_->conn->context)
+                      .create_plan(std::move(lowered.plan));
+    auto owner     = std::make_unique<EmbeddedPrepared::Impl>();
+    owner->context = impl_.get();
+    owner->cleaned = true;  // The surrounding transaction still owns the new views.
+    owner->plan    = duckdb::make_shared_ptr<sirius::sirius_prepared_statement_data>(
+      std::move(lowered.prepared), std::move(physical));
+    owner->views = std::move(views);
+    impl_->conn->Commit();
+    owner->cleaned = false;
+    return std::unique_ptr<EmbeddedPrepared>(new EmbeddedPrepared(std::move(owner)));
+  } catch (...) {
+    try {
+      impl_->conn->Rollback();
+    } catch (...) {
+    }
+    impl_->embedded_catalog->clear();
+    throw;
+  }
+}
 
 Context::Context(const std::string& config_path, uint32_t gpu_pipeline_threads)
   : impl_(std::make_unique<Impl>())

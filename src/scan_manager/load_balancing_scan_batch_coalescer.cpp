@@ -183,7 +183,7 @@ load_balancing_scan_batch_coalescer::get_split_provider_bridge(
   if (it->second->publication)
     throw std::logic_error("coordinator slot cannot use the legacy metadata bridge");
   return [state_ptr = it->second](exec::try_t<std::unique_ptr<op::scan::scan_info>>&& entry) {
-    state_ptr->queue.enqueue(std::move(entry));
+    (void)state_ptr->enqueue_bounded(std::move(entry));
   };
 }
 
@@ -205,6 +205,7 @@ void load_balancing_scan_batch_coalescer::process_provider_inputs(metadata_proce
                                                                   std::stop_token const& stop)
 {
   std::stop_callback stop_cb(stop, [&state] {
+    state.stop_queue();
     state.queue.enqueue(exec::make_empty_try<std::unique_ptr<op::scan::scan_info>>());
   });
   auto& batch_queue = state.queue;
@@ -232,6 +233,7 @@ void load_balancing_scan_batch_coalescer::process_provider_inputs(metadata_proce
     try {
       metadata_processing_state::provider_value_t entry;
       batch_queue.wait_dequeue(entry);
+      state.release_queued();
       if (entry.has_exception()) {
         close_slot(entry.exception());
         return;
@@ -254,6 +256,7 @@ void load_balancing_scan_batch_coalescer::process_provider_inputs(metadata_proce
       // silently dropped (which would scan fewer files than requested).
       metadata_processing_state::provider_value_t leftover;
       while (batch_queue.try_dequeue(leftover)) {
+        state.release_queued();
         if (leftover.has_exception()) {
           close_slot(leftover.exception());
           return;

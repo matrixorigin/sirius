@@ -42,6 +42,7 @@ struct recording {
   bool block{false};
   bool fail_run{false};
   bool fail_finish{false};
+  bool startable{true};
 };
 class test_driver final : public query_driver {
  public:
@@ -70,6 +71,7 @@ class test_driver final : public query_driver {
     if (r_->fail_finish) throw std::runtime_error("injected unprovable cleanup");
     ++r_->finished;
   }
+  bool startable() const noexcept override { return r_->startable; }
 
  private:
   void check_thread()
@@ -134,6 +136,60 @@ TEST_CASE("native coordinator keeps preparation execution and destruction on one
   CHECK(f.record->destroyed == 1);
   CHECK_FALSE(f.record->wrong_thread);
   CHECK(f.control.start(q).code == SIRIUS_INVALID_STATE);
+}
+
+TEST_CASE("prepared admission can remain explicitly non-startable", "[native_control]")
+{
+  fixture f;
+  f.record->startable = false;
+  auto q              = f.create();
+  REQUIRE(f.control.prepare(q, 10s).code == SIRIUS_OK);
+  REQUIRE(q->phase == query_phase::PREPARED);
+  REQUIRE(f.control.start(q).code == SIRIUS_UNSUPPORTED);
+  REQUIRE(q->phase == query_phase::PREPARED);
+  f.control.cancel(q);
+  REQUIRE(f.control.wait(q, 10s).code == SIRIUS_CANCELLED);
+  CHECK(f.record->ran == 0);
+  CHECK(f.record->finished == 1);
+}
+
+TEST_CASE("native contracts synchronously copy bounded descriptors", "[native_control]")
+{
+  fixture f;
+  auto q             = f.create();
+  char query_id[]    = "query";
+  char output_name[] = "out";
+  sirius_column output{23, 0, 0, 0, output_name, 3, 0};
+  sirius_query_contract contract{
+    sizeof(contract), SIRIUS_ABI_VERSION, 7, 0, query_id, 5, {0}, &output, 1};
+  f.control.bind_query(q, contract);
+  query_id[0] = output_name[0] = 'X';
+  CHECK(q->contract->query_id == "query");
+  CHECK(q->contract->outputs[0].name == "out");
+
+  char column_name[] = "c";
+  sirius_read_column column{{23, 0, 0, 0, column_name, 1, 0}, 99, 4, 0};
+  sirius_read_binding read{sizeof(read),
+                           SIRIUS_ABI_VERSION,
+                           42,
+                           SIRIUS_READ_MO,
+                           0,
+                           "db",
+                           2,
+                           "t",
+                           1,
+                           "s",
+                           1,
+                           &column,
+                           1,
+                           nullptr,
+                           0,
+                           nullptr,
+                           0};
+  f.control.register_read(q, read);
+  column_name[0] = 'X';
+  CHECK(q->bindings[0].columns[0].logical.name == "c");
+  REQUIRE_THROWS_AS(f.control.register_read(q, read), failure);
 }
 
 TEST_CASE("native queued cancellation bypasses blocked active execution", "[native_control]")

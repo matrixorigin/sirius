@@ -893,3 +893,29 @@ TEST_CASE("multi-partition dynamic-filter byte budgets reject zero and negative 
   std::error_code ec;
   std::filesystem::remove(path, ec);
 }
+
+TEST_CASE("embedded query budgets are configurable and reject zero", "[config_opt][embedding]")
+{
+  auto const path = std::filesystem::temp_directory_path() / "sirius_embedding_budget.yaml";
+  {
+    std::ofstream out(path);
+    out << "sirius:\n"
+           "  embedding:\n"
+           "    metadata_capacity_bytes: 128Mi\n"
+           "    tae_host_staging_bytes: 32Mi\n";
+  }
+  sirius_config config;
+  config.load_from_file(path);
+  CHECK(config.get_embedding_config().metadata_capacity_bytes == (128ULL << 20));
+  CHECK(config.get_embedding_config().tae_host_staging_bytes == (32ULL << 20));
+  {
+    std::ofstream out(path);
+    out << "sirius:\n"
+           "  embedding:\n"
+           "    metadata_capacity_bytes: 0\n";
+  }
+  sirius_config invalid;
+  REQUIRE_THROWS_AS(invalid.load_from_file(path), std::runtime_error);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
