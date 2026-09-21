@@ -2,8 +2,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "embedding/control.hpp"
+#include "embedding/input.hpp"
 #include "sirius_ffi.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -36,6 +38,76 @@ class native_backend final : public engine_backend {
     // bounded sources and sink before advertising executable native queries.
     // Never fall through to Context::execute_substrait's eager result path.
     throw failure(SIRIUS_UNSUPPORTED, "bounded native query adapters are not installed");
+  }
+  std::size_t metadata_capacity_bytes() const noexcept override
+  {
+    return context_->embedded_metadata_capacity_bytes();
+  }
+
+  std::unique_ptr<query_driver> prepare_bound(std::string_view plan,
+                                              query_state const& query,
+                                              input_registry& inputs,
+                                              std::stop_token,
+                                              clock::time_point) override
+  {
+    validate_embedded_plan(plan, query);
+    for (auto const& binding : query.bindings) {
+      auto input = std::find_if(inputs.reads.begin(), inputs.reads.end(), [&](auto const& read) {
+        return read->id == binding.binding_id;
+      });
+      if (binding.source_kind == SIRIUS_READ_TAE) {
+        if (input != inputs.reads.end())
+          throw failure(SIRIUS_INVALID_ARGUMENT, "TAE reads cannot register an MO producer");
+        continue;
+      }
+      if (input == inputs.reads.end())
+        throw failure(SIRIUS_INVALID_ARGUMENT, "MO read binding has no registered producer");
+      if ((*input)->schema.size() != binding.columns.size())
+        throw failure(SIRIUS_INVALID_ARGUMENT, "MO producer schema does not match read binding");
+      for (std::size_t i = 0; i < binding.columns.size(); ++i) {
+        auto const& actual   = (*input)->schema[i];
+        auto const& expected = binding.columns[i].logical;
+        if (actual.oid != expected.oid || actual.width != expected.width ||
+            actual.scale != expected.scale || actual.nullable != expected.nullable)
+          throw failure(SIRIUS_INVALID_ARGUMENT, "MO producer schema does not match read binding");
+      }
+    }
+    for (auto const& input : inputs.reads) {
+      auto binding = std::find_if(query.bindings.begin(), query.bindings.end(), [&](auto const& b) {
+        return b.binding_id == input->id && b.source_kind == SIRIUS_READ_MO;
+      });
+      if (binding == query.bindings.end())
+        throw failure(SIRIUS_INVALID_ARGUMENT, "MO producer has no matching read binding");
+    }
+    std::unique_ptr<ffi::EmbeddedPrepared> prepared;
+    try {
+      prepared = context_->prepare_embedded(std::string(plan), query, inputs);
+    } catch (std::bad_alloc const&) {
+      throw;
+    } catch (failure const&) {
+      throw;
+    } catch (std::exception const& e) {
+      throw failure(SIRIUS_UNSUPPORTED, e.what());
+    }
+    class prepared_driver final : public query_driver {
+     public:
+      explicit prepared_driver(std::unique_ptr<ffi::EmbeddedPrepared> plan) : plan_(std::move(plan))
+      {
+      }
+      void run(std::stop_token, clock::time_point) override {}
+      void finish() override
+      {
+        if (plan_) {
+          plan_->finish();
+          plan_.reset();
+        }
+      }
+      bool startable() const noexcept override { return false; }
+
+     private:
+      std::unique_ptr<ffi::EmbeddedPrepared> plan_;
+    };
+    return std::make_unique<prepared_driver>(std::move(prepared));
   }
 
  private:

@@ -25,6 +25,7 @@
 
 #include <functional>
 #include <memory>
+#include <thread>
 
 namespace sirius::op {
 class operator_data;
@@ -41,13 +42,12 @@ namespace sirius::scan_manager {
  *   - @ref next_split_provider — atomically claim the next batch and return a
  *     callable that processes it.
  *
- * Splitting the claim from the work lets @ref run() enqueue one task per
- * batch on the driver thread without serialising metadata processing
- * behind a chain of "claim-then-run" tasks. Each enqueued task holds a
- * token from an @c exec::completion_controller; when the last token is
- * released the controller pushes an empty split, which closes the
- * connector. A task that throws forwards the exception through the same
- * callback, so consumers see it via @ref split_connector::get_next_split.
+ * @ref run() launches one producer thread per scan. That thread claims and
+ * processes one metadata unit at a time, then sends the result through the
+ * bounded callback. The callback may apply back-pressure without occupying a
+ * shared dispatcher worker. Completion closes the connector, and producer
+ * failures are forwarded through the same callback so consumers see them via
+ * @ref split_connector::get_next_split.
  *
  * Pinned scans are served by @c cached_databatch_provider instead.
  */
@@ -68,22 +68,23 @@ class split_provider {
   virtual ~split_provider() = default;
 
   /**
-   * @brief Drive the provider to completion, dispatching one task per claimed
-   *        batch onto @p scheduler and pushing each task's splits into
-   *        @p connector.
+   * @brief Start the provider's per-scan producer thread.
    *
-   * The calling thread iterates @ref has_more_splits / @ref next_split_provider
-   * and hands the resulting callable to @p scheduler.enqueue. Enqueue is
-   * expected to be non-blocking, so this loop returns quickly. The connector
-   * is closed (with any worker-captured exception) when the last enqueued
-   * task drops its reference to the shared coordination state.
+   * The producer claims and executes one metadata task at a time. Its bounded
+   * @p on_split callback may block until downstream capacity is available.
+   * This intentionally keeps blocking reads and queue waits off the shared
+   * scan-manager dispatcher. The connector is closed after producer
+   * completion; exceptions are delivered through @p on_split.
    *
-   * @tparam Scheduler Anything with a @c enqueue(callable) method that runs
-   *                   the callable asynchronously. @c static_thread_pool and
-   *                   @c scoped_dispatcher both satisfy this shape.
+   * @note The producer is joined when the provider is destroyed. Call
+   *       @ref request_stop before teardown to interrupt a blocked metadata
+   *       read or callback.
    */
-  template <typename Scheduler>
-  void run(Scheduler& scheduler, const push_callback_t& on_split);
+  void run(const push_callback_t& on_split);
+  void request_stop() noexcept
+  {
+    if (_producer.joinable()) _producer.request_stop();
+  }
 
   /**
    * @brief Snapshot check for remaining work. Thread-safe.
@@ -120,6 +121,9 @@ class split_provider {
   io::ioctx_resolver _resolve;
 
   exec::completion_token _completion_token;
+  // A bounded-output producer can wait here without consuming a shared
+  // dispatcher worker or preventing query setup from completing.
+  std::jthread _producer;
 };
 
 }  // namespace sirius::scan_manager

@@ -35,6 +35,7 @@
 
 #include <concurrentqueue.h>
 
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <stop_token>
@@ -146,6 +147,32 @@ class load_balancing_scan_batch_coalescer {
     std::size_t pipeline_id{0};
     using provider_value_t = exec::try_t<std::unique_ptr<op::scan::scan_info>>;
     duckdb_moodycamel::BlockingConcurrentQueue<provider_value_t> queue;
+    bool enqueue_bounded(provider_value_t value)
+    {
+      std::unique_lock lock(queue_mutex);
+      queue_space.wait(lock, [this] { return queue_stopped || queue_size < max_provider_ready; });
+      if (queue_stopped) return false;
+      ++queue_size;
+      queue.enqueue(std::move(value));
+      return true;
+    }
+    void release_queued()
+    {
+      std::lock_guard lock(queue_mutex);
+      if (queue_size) --queue_size;
+      queue_space.notify_one();
+    }
+    void stop_queue()
+    {
+      std::lock_guard lock(queue_mutex);
+      queue_stopped = true;
+      queue_space.notify_all();
+    }
+    static constexpr std::size_t max_provider_ready = 4;
+    std::mutex queue_mutex;
+    std::condition_variable queue_space;
+    std::size_t queue_size{0};
+    bool queue_stopped{false};
     std::shared_ptr<op::scan::batch_coalescer> coalescer;
     std::shared_ptr<balancing_strategy> balancer;
     std::shared_ptr<split_connector> connector;

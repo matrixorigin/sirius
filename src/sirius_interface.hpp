@@ -56,8 +56,8 @@ struct sirius_active_query_context {
 class sirius_interface {
  public:
   sirius_interface(duckdb::ClientContext& client_context,
-                   std::optional<std::string> query_label   = std::nullopt,
-                   std::optional<std::string> session_label = std::nullopt,
+                   std::optional<std::string> query_label       = std::nullopt,
+                   std::optional<std::string> session_label     = std::nullopt,
                    std::shared_ptr<execution_evidence> evidence = nullptr);
   //! The client context
   duckdb::ClientContext& client_context;

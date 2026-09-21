@@ -9,12 +9,15 @@
 #include <duckdb/common/types.hpp>
 #include <duckdb/main/client_context.hpp>
 #include <duckdb/planner/table_filter.hpp>
+#include <embedding/buffer_budget.hpp>
 #include <op/scan/gpu_ingestible.hpp>
 #include <op/scan/tae_scan_plan.hpp>
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -51,6 +54,9 @@ class tae_ingestible_table_info final : public ingestible_table_info {
 /// A scanner-produced compressed object ready for GPU LZ4 decode.
 class tae_scan_info final : public scan_info {
  public:
+  // Declared before the host owner so destruction frees payload bytes first,
+  // then returns staging credit.
+  std::shared_ptr<sirius::embedding::buffer_budget::lease> host_credit;
   std::shared_ptr<sirius::pinned_host_buffer> host_data;
   std::vector<sirius::host_tae_representation::column_chunk_info> chunks;
   std::size_t rows               = 0;
@@ -69,6 +75,7 @@ class tae_gpu_ingestible final : public gpu_ingestible {
  public:
   explicit tae_gpu_ingestible(std::unique_ptr<tae_ingestible_table_info> info);
   ~tae_gpu_ingestible() override;
+  void stop_metadata_scan() noexcept override;
 
   std::unique_ptr<batch_coalescer> create_batch_coalescer() const override;
   [[nodiscard]] bool has_processed_all_metadata() const override;
@@ -100,14 +107,19 @@ class tae_gpu_ingestible final : public gpu_ingestible {
 
  private:
   [[nodiscard]] std::unique_ptr<tae_scan_info> load_object(
-    std::size_t object_index, std::shared_ptr<io::sirius_ioctx> const& io_ctx) const;
+    std::size_t object_index,
+    std::size_t block_index,
+    std::shared_ptr<io::sirius_ioctx> const& io_ctx) const;
   [[nodiscard]] std::unique_ptr<cudf::table> make_empty_table(
     const cucascade::memory::memory_space& mem_space, rmm::cuda_stream_view stream) const;
 
   std::unique_ptr<tae_ingestible_table_info> _info;
   tae_scan_plan _plan;
   std::shared_ptr<duckdb::Expression> _filter_expression;
-  std::atomic<std::size_t> _next_object{0};
+  mutable std::mutex _work_mutex;
+  std::size_t _next_object{0};
+  std::size_t _next_block{0};
+  std::stop_source _metadata_stop;
 };
 
 std::shared_ptr<tae_gpu_ingestible> make_ingestible(

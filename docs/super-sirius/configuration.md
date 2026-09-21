@@ -597,6 +597,26 @@ temporarily disabled while the cuCollections defect tracked in #1600 remains unr
 engine retains the guarded single-pass `cudf::distinct_hash_join` path for policy-controlled use
 after that dependency is fixed.
 
+## Embedded Query Budgets
+
+The additive native embedding API has process-wide accounting for copied query metadata and a
+shared per-query host staging window for embedded TAE reads. Both values must be positive:
+
+```yaml
+sirius:
+  embedding:
+    metadata_capacity_bytes: 256Mi
+    tae_host_staging_bytes: 64Mi
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `metadata_capacity_bytes` | bytes | 256 MiB | Shared process budget for copied Substrait plans, query/read contracts, manifests, parsed TAE metadata, and pending read descriptors. A reservation failure returns `SIRIUS_RESOURCE_EXHAUSTED`. |
+| `tae_host_staging_bytes` | bytes | 64 MiB | Shared per-query host staging budget for demand-driven embedded TAE reads; it bounds prefetched and in-flight payloads, not decoded GPU chunk size. |
+
+The host staging setting is consumed when the embedded TAE payload pump is enabled; stage 5 only
+parses manifests and prepares plans, so it does not reserve payload staging during preparation.
+
 ## Telemetry
 
 ```yaml

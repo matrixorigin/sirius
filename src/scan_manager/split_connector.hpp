@@ -136,12 +136,14 @@ class split_connector : public std::enable_shared_from_this<split_connector> {
 
   mutable std::mutex _mutex;
   std::condition_variable _cv;
+  std::condition_variable _space;
   struct queued_split {
     std::unique_ptr<op::operator_data> input;
     size_t preparation_bytes;
   };
   std::deque<queued_split> _splits;
   bool _closed{false};
+  static constexpr std::size_t max_ready_splits_ = 4;
   std::exception_ptr _exception;
   /// steady_clock ms timestamp of the last get_next_split() pop (0 = never).
   std::atomic<std::int64_t> _last_pop_ms{0};

@@ -79,8 +79,9 @@ class scan_operator_input;
 /**
  * @brief Abstract source of cudf tables. One implementation per data format.
  *
- * Composed by @c scan_manager::split_provider, which drives the metadata
- * worker pool via @ref has_more_splits and @ref next_split_provider, and by
+ * Composed by @c scan_manager::split_provider, which drives metadata work on
+ * a per-scan producer thread via @ref has_processed_all_metadata and
+ * @ref next_split_provider, and by
  * @c sirius::op::scan::sirius_gpu_scan_operator, which calls
  * @ref materialize_table (and conditionally @ref post_filter_and_project)
  * on each split it pulls off its connector.
@@ -106,6 +107,7 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
   virtual std::unique_ptr<op::operator_data> live_claim();
   virtual void live_subscribe(std::shared_ptr<embedding::capacity_waker>) {}
   virtual void live_stop() {}
+  virtual void stop_metadata_scan() noexcept {}
 
   gpu_ingestible(gpu_ingestible const&)            = delete;
   gpu_ingestible& operator=(gpu_ingestible const&) = delete;
@@ -140,9 +142,9 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
   /**
    * @brief Snapshot check for remaining work. Thread-safe.
    *
-   * Called by @c split_provider::run on the driver thread before claiming
-   * the next batch. Implementations typically compare an atomic batch
-   * index against a precomputed total.
+   * Called by the scan's producer thread before it claims the next metadata
+   * unit. Implementations typically compare an atomic cursor against a
+   * precomputed total.
    */
   [[nodiscard]] virtual bool has_processed_all_metadata() const = 0;
 
@@ -150,11 +152,10 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
    * @brief Atomically claim the next batch and return a callable that
    *        produces its operator_data splits. Thread-safe.
    *
-   * Splitting the claim from the work lets @c split_provider::run enqueue
-   * one task per batch onto the scan_manager's worker pool. The callable
-   * returns the splits as a vector of operator_data; an empty vector or a
-   * null callable indicates no work was claimed (the driver loop skips
-   * empty handoffs).
+   * The per-scan producer invokes the returned callable serially. This keeps
+   * metadata and payload reads demand-driven; its bounded output callback
+   * provides back-pressure without blocking a shared dispatcher worker. A
+   * null callable indicates that no work was claimed.
    */
   virtual metadata_scan_task_t next_split_provider(io::ioctx_resolver resolve) = 0;
 

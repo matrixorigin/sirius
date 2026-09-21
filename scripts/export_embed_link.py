@@ -40,7 +40,9 @@ def link_arguments(commands, build, consumer):
             if word.startswith("-Wl,--dependency-file="):
                 continue
             if word.startswith("@"):
-                raise RuntimeError("opaque Ninja response file: cannot export a complete SDK")
+                raise RuntimeError(
+                    "opaque Ninja response file: cannot export a complete SDK"
+                )
             if not word.startswith("-") and (build / word).exists():
                 word = str((build / word).resolve())
             arguments.append(word)
@@ -61,19 +63,30 @@ def main():
     build = args.build.resolve()
     commands = subprocess.run(
         [args.ninja, "-C", str(build), "-t", "commands", "sirius_c_smoke"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     compiler, flags = link_arguments(commands, build, args.consumer.resolve())
-    match = re.search(r"^#define\s+SIRIUS_ABI_VERSION\s+(\d+)[uU]?\b", args.header.read_text(), re.M)
+    match = re.search(
+        r"^#define\s+SIRIUS_ABI_VERSION\s+(\d+)[uU]?\b", args.header.read_text(), re.M
+    )
     if not match:
         raise RuntimeError("missing native ABI version")
     args.output.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.header, args.output / "sirius_c.h")
-    manifest = {"schema_version": 1, "abi_version": int(match[1]),
-                "compiler": compiler, "build_directory": str(build), "link_arguments": flags}
+    manifest = {
+        "schema_version": 1,
+        "abi_version": int(match[1]),
+        "compiler": compiler,
+        "build_directory": str(build),
+        "link_arguments": flags,
+    }
     (args.output / "link.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # GCC/Clang response files accept quoted arguments with backslash escapes.
-    response = "\n".join('"' + flag.replace('\\', '\\\\').replace('"', '\\"') + '"' for flag in flags)
+    response = "\n".join(
+        '"' + flag.replace("\\", "\\\\").replace('"', '\\"') + '"' for flag in flags
+    )
     (args.output / "link.rsp").write_text(response + "\n")
     (args.output / "SiriusEmbedConfig.cmake").write_text(
         "if(NOT TARGET Sirius::embed)\n"

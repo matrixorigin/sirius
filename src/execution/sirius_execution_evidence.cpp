@@ -21,7 +21,9 @@ namespace sirius {
 namespace {
 
 bool is_valid_backend(execution_backend backend) noexcept
-{ return backend == execution_backend::SIRIUS_GPU || backend == execution_backend::DUCKDB_CPU; }
+{
+  return backend == execution_backend::SIRIUS_GPU || backend == execution_backend::DUCKDB_CPU;
+}
 
 bool is_valid_terminal_outcome(execution_outcome outcome) noexcept
 {
@@ -32,7 +34,9 @@ bool is_valid_terminal_outcome(execution_outcome outcome) noexcept
 }  // namespace
 
 execution_evidence::execution_evidence(execution_backend planned_backend) noexcept
-{ state_.planned_backend = planned_backend; }
+{
+  state_.planned_backend = planned_backend;
+}
 
 bool execution_evidence::mark_backend_started(execution_backend backend) noexcept
 {
