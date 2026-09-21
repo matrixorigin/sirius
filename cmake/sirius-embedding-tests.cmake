@@ -113,3 +113,5 @@ add_custom_command(
     "${CMAKE_CURRENT_BINARY_DIR}/embedding-sdk"
   VERBATIM)
 
+
+target_sources(sirius_native_control_unittest PRIVATE test/cpp/embedding/test_native_execution_stats.cpp src/embedding/execution_stats.cpp)
