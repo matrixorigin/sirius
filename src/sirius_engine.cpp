@@ -21,6 +21,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/thread_context.hpp"
+#include "embedding/execution_interrupted.hpp"
 #include "io/sirius_datasource.hpp"
 #include "log/logging.hpp"
 #include "op/scan/gpu_ingestible.hpp"
@@ -242,7 +243,26 @@ void sirius_engine::initialize(duckdb::unique_ptr<op::sirius_physical_operator> 
   initialize_internal(*sirius_owned_plan);
 }
 
-void sirius_engine::execute()
+void sirius_engine::execute() { execute({}, std::chrono::steady_clock::time_point::max()); }
+
+void sirius_engine::report_execution_error(std::exception_ptr error)
+{
+  std::shared_ptr<pipeline::completion_handler> handler;
+  {
+    std::lock_guard lock(completion_mutex_);
+    handler = completion_handler_;
+  }
+  if (!handler) return;
+  try {
+    std::rethrow_exception(error);
+  } catch (pipeline::gpu_stream_quiescence_error const&) {
+    handler->report_fatal_error(std::move(error));
+  } catch (...) {
+    handler->report_error(std::move(error));
+  }
+}
+
+void sirius_engine::execute(std::stop_token stop, std::chrono::steady_clock::time_point deadline)
 {
   nvtx_scoped_range nvtx_range{"sirius::query"};
   query_handle_.executing();
@@ -263,7 +283,10 @@ void sirius_engine::execute()
 
   // This query's completion signal. Owned here, shared down to every task via its pipeline's
   // global state, so no cross-query subsystem holds a "current query" handler.
-  completion_handler_ = sirius_ctx->window_completion(query_id_);
+  {
+    std::lock_guard lock(completion_mutex_);
+    completion_handler_ = sirius_ctx->window_completion(query_id_);
+  }
   if (!completion_handler_) {
     throw std::logic_error("execution requires a live window completion handler");
   }
@@ -273,6 +296,10 @@ void sirius_engine::execute()
 
   plan_users_quiescent_ = false;
   // Create the query with the pipelines. It is owned here, alongside the plan it indexes.
+  auto cancelled = std::make_exception_ptr(embedding::execution_interrupted(false));
+  std::stop_callback cancel(stop, [handler = completion_handler_, cancelled] {
+    handler->report_error(cancelled);
+  });
   try {
     query_ = sirius_ctx->create_query(std::move(new_scheduled),
                                       query_id_,
@@ -283,6 +310,7 @@ void sirius_engine::execute()
                                         .query_id           = query_id_,
                                       },
                                       [&client = context] { return client.IsInterrupted(); });
+    if (stop.stop_requested()) std::rethrow_exception(cancelled);
     sirius_ctx->get_task_scheduler().start_query(*query_);
     sirius_ctx->get_scan_manager().start_preparation(query_id_);
   } catch (...) {
@@ -291,8 +319,10 @@ void sirius_engine::execute()
   }
   try {
     sirius_ctx->get_scan_manager().await_query_completion(
-      query_id_, future, [&client = context, sirius_ctx] {
+      query_id_, future, [&client = context, sirius_ctx, deadline] {
         if (client.IsInterrupted()) return true;
+        if (std::chrono::steady_clock::now() >= deadline)
+          throw embedding::execution_interrupted(true);
         if (sirius_ctx->get_runtime_health() == duckdb::SiriusContext::runtime_health::UNAVAILABLE)
           sirius_ctx->throw_runtime_unavailable();
         return false;

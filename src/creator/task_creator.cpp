@@ -438,7 +438,11 @@ void task_creator::reschedule(std::unique_ptr<parallel::itask> task)
 void task_creator::schedule(op::sirius_physical_operator* node)
 {
   const auto [query_id, priority] = request_keys_for(node);
-  if (node && node->type == op::SiriusPhysicalOperatorType::GPU_SCAN) {
+  // Keep ordinary downstream scheduling off the query-registry mutex. Only
+  // GPU scan sources and bounded terminal sources have native subscriptions.
+  if (node && (node->type == op::SiriusPhysicalOperatorType::GPU_SCAN ||
+               (node->get_pipeline() && node->get_pipeline()->get_sink() &&
+                node->get_pipeline()->get_sink()->terminal_admission_control()))) {
     if (auto state = get_query_task_global_state(query_id)) {
       if (auto it = state->live_wakes.find(node); it != state->live_wakes.end()) {
         it->second->wake();
@@ -461,7 +465,9 @@ void task_creator::schedule(op::sirius_physical_operator* node)
 
 void task_creator::schedule(op::sirius_physical_operator* node, sirius::query_id_t query_id)
 {
-  if (node && node->type == op::SiriusPhysicalOperatorType::GPU_SCAN) {
+  if (node && (node->type == op::SiriusPhysicalOperatorType::GPU_SCAN ||
+               (node->get_pipeline() && node->get_pipeline()->get_sink() &&
+                node->get_pipeline()->get_sink()->terminal_admission_control()))) {
     if (auto state = get_query_task_global_state(query_id)) {
       if (auto it = state->live_wakes.find(node); it != state->live_wakes.end()) {
         it->second->wake();
@@ -728,6 +734,13 @@ void task_creator::manager_loop()
 
             while (!node->all_ports_empty()) {
               auto task_lock  = pipeline->get_task_creation_lock();
+              std::shared_ptr<embedding::terminal_ticket> terminal_ticket;
+              if (auto sink = pipeline->get_sink()) {
+                if (auto admission = sink->terminal_admission_control()) {
+                  terminal_ticket = admission->try_acquire();
+                  if (!terminal_ticket) break;
+                }
+              }
               auto input_data = node->get_next_task_input_data();
               auto* pipelineable_input =
                 dynamic_cast<op::pipelineable_operator_data*>(input_data.get());
@@ -746,6 +759,7 @@ void task_creator::manager_loop()
               auto gpu_pipeline_task_global_state = gs_it->second;
               auto local_state =
                 std::make_unique<pipeline::gpu_pipeline_task_local_state>(std::move(input_data));
+              local_state->terminal_ticket = std::move(terminal_ticket);
 
               // pipelineable_input remains valid here: the cast happened before
               // the move into local_state, and unique_ptr move transfers
@@ -919,10 +933,19 @@ void task_creator::arm_live_inputs(const planner::query& query)
   auto state = get_query_task_global_state(query.query_id());
   if (!state) throw std::runtime_error("live scan query state is missing");
   // Populate the entire immutable map before publishing any callback.
+  std::vector<op::sirius_physical_operator*> wake_sources;
   for (auto* node : query.get_scan_operators()) {
-    if (node->type != op::SiriusPhysicalOperatorType::GPU_SCAN) continue;
-    auto& scan = node->Cast<op::scan::sirius_gpu_scan_operator>();
-    if (!scan.get_ingestible().is_live()) continue;
+    if (node->type == op::SiriusPhysicalOperatorType::GPU_SCAN &&
+        node->Cast<op::scan::sirius_gpu_scan_operator>().get_ingestible().is_live())
+      wake_sources.push_back(node);
+  }
+  for (auto const& pipeline : query.get_pipelines()) {
+    if (auto sink = pipeline->get_sink(); sink && sink->terminal_admission_control()) {
+      if (auto source = pipeline->get_source()) wake_sources.push_back(source.get());
+    }
+  }
+  for (auto* node : wake_sources) {
+    if (state->live_wakes.contains(node)) continue;
     auto [id, priority]                         = request_keys_for(node);
     std::weak_ptr<query_task_global_state> weak = state;
     auto wake                                   = std::make_shared<embedding::source_wakeup>(
@@ -946,8 +969,15 @@ void task_creator::arm_live_inputs(const planner::query& query)
       });
     state->live_wakes.emplace(node, std::move(wake));
   }
-  for (auto const& [node, wake] : state->live_wakes)
-    node->Cast<op::scan::sirius_gpu_scan_operator>().get_ingestible().live_subscribe(wake);
+  for (auto const& [node, wake] : state->live_wakes) {
+    if (node->type == op::SiriusPhysicalOperatorType::GPU_SCAN) {
+      auto& ingestible = node->Cast<op::scan::sirius_gpu_scan_operator>().get_ingestible();
+      if (ingestible.is_live()) ingestible.live_subscribe(wake);
+    }
+    if (auto sink = node->get_pipeline()->get_sink()) {
+      if (auto admission = sink->terminal_admission_control()) admission->subscribe(wake);
+    }
+  }
 }
 
 }  // namespace sirius::creator

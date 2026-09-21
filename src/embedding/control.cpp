@@ -3,7 +3,9 @@
  */
 #include "embedding/control.hpp"
 
+#include "embedding/execution_interrupted.hpp"
 #include "embedding/input.hpp"
+#include "embedding/result.hpp"
 #include "embedding/tae_demand.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
@@ -39,6 +41,8 @@ sirius_error current_error() noexcept
     throw;
   } catch (failure const& e) {
     return e.error;
+  } catch (execution_interrupted const& e) {
+    return error(e.deadline_expired ? SIRIUS_TIMEOUT : SIRIUS_CANCELLED, e.what());
   } catch (pipeline::gpu_stream_quiescence_error const& e) {
     return error(SIRIUS_GPU_UNAVAILABLE, e.what());
   } catch (std::bad_alloc const&) {
@@ -88,6 +92,7 @@ std::shared_ptr<query_state> engine_control::create(std::string_view plan,
   // each allocate a maximum-size plan outside the query-count limit.
   auto q            = std::make_shared<query_state>();
   q->inputs         = std::make_shared<input_registry>();
+  q->results        = std::make_shared<native_result>();
   q->plan           = plan;
   q->metadata_bytes = metadata_charge;
   q->metadata_leases.push_back(std::move(plan_credit));
@@ -162,13 +167,42 @@ void engine_control::bind_query(std::shared_ptr<query_state> const& q,
   }
   if (actual_charge > canonical)
     throw failure(SIRIUS_INVALID_ARGUMENT, "output contract size overflow");
+  std::vector<sirius_column> schema;
+  schema.reserve(owned->outputs.size());
+  for (auto const& c : owned->outputs)
+    schema.push_back({c.oid,
+                      c.width,
+                      c.scale,
+                      c.nullable,
+                      c.name.data(),
+                      static_cast<uint32_t>(c.name.size()),
+                      0});
   std::lock_guard lock(mutex_);
   if (q->phase != query_phase::CREATED || q->contract)
     throw failure(SIRIUS_INVALID_STATE, "query binding requires one created query");
   q->metadata_leases.reserve(q->metadata_leases.size() + 1);
   q->metadata_bytes += charged;
   q->metadata_leases.push_back(std::move(credit));
-  q->contract = std::move(owned);
+  q->contract      = std::move(owned);
+  q->result_schema = std::move(schema);
+}
+void engine_control::require_result_active(std::shared_ptr<query_state> const& q)
+{
+  std::lock_guard lock(mutex_);
+  if (!q->started || q->phase == query_phase::CLOSED)
+    throw failure(SIRIUS_INVALID_STATE, "native result requires a started query");
+}
+sirius_result_schema engine_control::result_schema(std::shared_ptr<query_state> const& q)
+{
+  std::lock_guard lock(mutex_);
+  if (!q->contract || q->phase == query_phase::CREATED || q->phase == query_phase::QUEUED ||
+      q->phase == query_phase::PREPARING || q->phase == query_phase::CLOSED)
+    throw failure(SIRIUS_INVALID_STATE, "result schema requires prepared query");
+  return {sizeof(sirius_result_schema),
+          SIRIUS_ABI_VERSION,
+          static_cast<uint32_t>(q->result_schema.size()),
+          0,
+          q->result_schema.data()};
 }
 void engine_control::register_read(std::shared_ptr<query_state> const& q,
                                    sirius_read_binding const& binding)
@@ -346,6 +380,7 @@ void engine_control::cancel(std::shared_ptr<query_state> const& q)
 {
   // stop callbacks must be nonblocking; invoking one under mutex_ could deadlock.
   q->stop.request_stop();
+  q->results->cancel();
   {
     std::lock_guard lock(mutex_);
     if (q->phase == query_phase::CREATED || q->phase == query_phase::QUEUED) {
@@ -375,15 +410,21 @@ sirius_error engine_control::close_query(std::shared_ptr<query_state> const& q,
   if (!quiesced(*q) || result.code == SIRIUS_GPU_UNAVAILABLE) return result;
   if (q->inputs->handles || q->inputs->filling_handles)
     return error(SIRIUS_BUSY, "close outstanding native input handles and leases first");
+  if (q->results->borrowed() || q->results->inspect().leases != 0)
+    return error(SIRIUS_BUSY, "release outstanding or retiring native result batches first");
   if (q->phase != query_phase::CLOSED) {
-    q->phase = query_phase::CLOSED;
-    queries_[q->slot].reset();
-    --live_;
+    // Keep the CPU facades valid for an engine-stop snapshot already holding q,
+    // but release runtime-dependent owners before allowing backend retirement.
+    q->inputs->reads.clear();
     q->metadata_bytes = 0;
     q->metadata_leases.clear();
     q->plan.clear();
     q->contract.reset();
+    q->result_schema.clear();
     q->bindings.clear();
+    q->phase = query_phase::CLOSED;
+    queries_[q->slot].reset();
+    --live_;
   }
   return {};
 }
@@ -454,6 +495,8 @@ void engine_control::process(engine_backend& backend,
   } catch (...) {
     result = current_error();
   }
+  if (!backend.available())
+    result = error(SIRIUS_GPU_UNAVAILABLE, "native backend health is unavailable");
   {
     std::lock_guard lock(mutex_);
     q->phase = query_phase::DRAINING;
@@ -465,6 +508,8 @@ void engine_control::process(engine_backend& backend,
       result = error(SIRIUS_GPU_UNAVAILABLE, "native cleanup could not prove quiescence");
     }
   }
+  if (!backend.available())
+    result = error(SIRIUS_GPU_UNAVAILABLE, "native backend cleanup poisoned the runtime");
   if (result.code == SIRIUS_GPU_UNAVAILABLE) {
     // The process is now the cleanup owner. Do not destruct live CUDA buffers
     // or a thread-affine window after a failed synchronization.
@@ -476,6 +521,7 @@ void engine_control::process(engine_backend& backend,
     q->inputs->stop();
     q->inputs->discard();
   }
+  q->results->complete(result);
   {
     std::lock_guard lock(mutex_);
     q->result = result;
