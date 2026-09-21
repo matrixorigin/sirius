@@ -112,6 +112,7 @@ class gpu_ingestible : public std::enable_shared_from_this<gpu_ingestible> {
   virtual std::unique_ptr<op::operator_data> live_claim();
   virtual void live_subscribe(std::shared_ptr<embedding::capacity_waker>) {}
   virtual void live_stop() {}
+  virtual void stop_metadata_scan() noexcept {}
 
   gpu_ingestible(gpu_ingestible const&)            = delete;
   gpu_ingestible& operator=(gpu_ingestible const&) = delete;

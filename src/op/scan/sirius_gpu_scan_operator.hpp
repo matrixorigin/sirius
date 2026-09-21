@@ -168,6 +168,7 @@ class sirius_gpu_scan_operator : public sirius_physical_operator {
   void on_finalize_operator() override
   {
     if (_ingestible && _ingestible->is_live()) _ingestible->live_stop();
+    if (_ingestible) _ingestible->stop_metadata_scan();
   }
 
   std::optional<task_creation_hint> get_next_task_hint() override;

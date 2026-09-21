@@ -71,22 +71,23 @@ std::uint16_t checked_uint16(std::size_t value, const char* what)
 
 void resolve_projected_column(tae_scan_plan::projected_column& pc,
                               const tae_scan_plan& plan,
-                              const duckdb::vector<sirius::logical_type>& returned_types)
+                              const duckdb::vector<sirius::logical_type>& returned_types,
+                              std::size_t logical_index)
 {
   // Resolve the MO type oid from the bind data's all_col_mo_oids (P-indexed).
   // Match the prior compute_task default: MO_T_any when the seqnum is out of
   // bounds (e.g. virtual / synthetic columns; we filter those out at build
   // time but keep the defensive default here so we never index OOB at decode).
-  pc.type_oid = (pc.seqnum < plan.all_col_mo_oids.size())
-                  ? static_cast<tae::MOTypeOid>(plan.all_col_mo_oids[pc.seqnum])
+  pc.type_oid = (logical_index < plan.all_col_mo_oids.size())
+                  ? static_cast<tae::MOTypeOid>(plan.all_col_mo_oids[logical_index])
                   : tae::MO_T_any;
 
   // Pre-resolve decimal width/scale once. compute_task used to do this per
   // chunk; for fixed-width decimal columns with hundreds of chunks per task
   // that's hundreds of redundant lookups per task.
-  if (pc.seqnum < returned_types.size() && returned_types[pc.seqnum].is_decimal()) {
-    pc.width = static_cast<std::int32_t>(returned_types[pc.seqnum].decimal_precision());
-    pc.scale = static_cast<std::int32_t>(returned_types[pc.seqnum].decimal_scale());
+  if (logical_index < returned_types.size() && returned_types[logical_index].is_decimal()) {
+    pc.width = static_cast<std::int32_t>(returned_types[logical_index].decimal_precision());
+    pc.scale = static_cast<std::int32_t>(returned_types[logical_index].decimal_scale());
   }
 }
 
@@ -103,9 +104,14 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
 
   // Copy P-indexed schema metadata. These are small (a handful of strings +
   // bytes); copying is simpler and safer than holding refs into bind_data.
-  plan.all_col_names   = bind_data.all_col_names;
-  plan.all_col_mo_oids = bind_data.all_col_mo_oids;
-  plan.sort_column_idx = bind_data.sort_column_idx;
+  plan.all_col_names     = bind_data.all_col_names;
+  plan.all_col_mo_oids   = bind_data.all_col_mo_oids;
+  plan.logical_to_seqnum = bind_data.all_col_seqnums;
+  plan.sort_column_idx =
+    bind_data.sort_column_idx >= 0 &&
+        static_cast<std::size_t>(bind_data.sort_column_idx) < plan.logical_to_seqnum.size()
+      ? plan.logical_to_seqnum[bind_data.sort_column_idx]
+      : -1;
 
   // Resolve projected columns in projection order. Mirrors the per-task loop
   // in compute_task today (lines 269-282 of tae_scan_task.cpp pre-refactor)
@@ -137,9 +143,13 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
     }
 
     tae_scan_plan::projected_column pc{};
-    pc.seqnum           = checked_uint16(primary_idx, "seqnum");
+    if (primary_idx >= plan.logical_to_seqnum.size())
+      throw sirius::internal_exception("[tae_scan_plan] logical column {} outside schema",
+                                       primary_idx);
+    pc.seqnum           = plan.logical_to_seqnum[primary_idx];
+    pc.logical_idx      = checked_uint16(primary_idx, "logical_idx");
     pc.col_ids_position = checked_uint16(column_ids_pos, "col_ids_position");
-    resolve_projected_column(pc, plan, returned_types);
+    resolve_projected_column(pc, plan, returned_types, primary_idx);
     plan.projected_columns.push_back(pc);
   };
 
@@ -185,10 +195,12 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
       if (col_idx >= column_ids.size()) continue;
       auto const seqnum_p = column_ids[col_idx].GetPrimaryIndex();
       if (duckdb::IsVirtualColumn(seqnum_p)) continue;
-      auto const seqnum = checked_uint16(seqnum_p, "filter seqnum");
+      if (seqnum_p >= plan.logical_to_seqnum.size())
+        throw sirius::internal_exception("[tae_scan_plan] filter column outside schema");
+      auto const seqnum = plan.logical_to_seqnum[seqnum_p];
       auto const c      = checked_uint16(col_idx, "filter column_ids index");
       std::uint8_t const mo_oid =
-        (seqnum < plan.all_col_mo_oids.size()) ? plan.all_col_mo_oids[seqnum] : 0;
+        (seqnum_p < plan.all_col_mo_oids.size()) ? plan.all_col_mo_oids[seqnum_p] : 0;
       tae::ExtractFilter(*filter, c, seqnum, mo_oid, plan.pushed_filters);
     }
     if (!plan.pushed_filters.empty()) {

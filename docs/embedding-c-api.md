@@ -2,10 +2,12 @@
 
 Tracking: [MatrixOne #28966](https://github.com/matrixorigin/matrixone/issues/28966).
 Stages 3 and 4 provide the control/library foundation and bounded MO input.
-Stages 5-6 add admitted Substrait/TAE bindings and native result adapters. The public
-capability mask currently advertises **ENGINE_CONTROL only**. Query preparation
-returns `SIRIUS_UNSUPPORTED`; this is not a working native SQL data path and must
-not be substituted for Flight yet. Numeric compatibility is separately tracked
+Stage 5 adds admitted Substrait MO/TAE bindings; stage 6 adds native result adapters.
+The public capability mask still advertises **ENGINE_CONTROL only**. A valid bound
+query can now prepare and retain its optimized Sirius physical plan, but `start`
+returns `SIRIUS_UNSUPPORTED` without changing query phase because results are not
+installed. This is not a working native SQL data path and must not be substituted
+for Flight yet. Numeric compatibility is separately tracked
 by [#28968](https://github.com/matrixorigin/matrixone/issues/28968).
 
 ## Build and link
@@ -53,6 +55,11 @@ global GPU allocators. The embedding context disables automatic DuckDB extension
 loading to avoid constructing a second Sirius runtime; required extensions are
 loaded explicitly.
 
+The YAML `sirius.embedding.metadata_capacity_bytes` setting defaults to 256 MiB
+and charges copied plans, contracts, read schemas, manifests, and a conservative
+allowance for parsed TAE metadata before retaining them. The adjacent
+`tae_host_staging_bytes` setting defaults to 64 MiB for the later payload pump.
+
 The coordinator initializes and destroys the runtime, and performs preparation,
 execution and query teardown, on one native thread. Foreign callers never own
 DuckDB's thread-affine execution-window mutex. Stop-token cancellation bypasses
@@ -92,11 +99,16 @@ removes scheduling callbacks; callbacks run outside the accounting lock.
 Native input carries these leases through filling, publication, source claims
 and asynchronous GPU conversion/retry. The native result sink is still pending.
 
-## Bounded native MO input (stage 4)
+## Bound native plans and inputs (stages 4-5)
 
-The C input operations are additive to ABI version 1; no Flight protocol changes
-or new runtime configuration are required. Production preparation deliberately
-remains unsupported until stage 5 implements strict plan/binding admission.
+The C input and binding operations are additive to ABI version 1; no Flight
+protocol change is required. Stage 5 accepts only Substrait 0.78 plans whose reads
+are named `__sirius_embedded_v1/<canonical binding id>`, match copied contracts,
+and use the registered read set exactly. Arbitrary catalog/file/extension reads
+are rejected before DuckDB lowering. MO and in-memory TAE bindings are installed
+as typed private relations; no SQL text is assembled. The optimized GPU physical
+plan is retained on the coordinator, while production input acquisition remains
+disabled because the plan is intentionally non-startable until stage 6.
 The private integration-test backend exercises the production C entry points,
 pooled source and real GPU scheduler; it is not linked into `Sirius::embed`.
 
@@ -105,9 +117,10 @@ pooled source and real GPU scheduler; it is not linked into `Sirius::embed`.
 1. Register at most 16 query-local binding IDs while the query is CREATED.
    Registration copies at most 1024 column descriptors per input. Registration
    freezes when preparation is queued; duplicate IDs are rejected.
-2. After successful preparation, acquire a C-owned batch lease. Queued or
-   preparing queries cannot allocate input buffers. Acquire observes both the
-   caller wait timeout and query cancellation/deadline.
+2. Batch acquisition is currently unavailable in production because stage 5
+   intentionally prepares a non-startable query. Once stage 6 installs the
+   result path, acquire will issue a C-owned batch lease only for a started
+   query and will observe the caller timeout and query cancellation/deadline.
 3. Write MO value bytes, varlena areas and raw null words with synchronous bulk
    copies. The implementation does not retain the source pointer. Neither
    Flight frames nor serialized TAE vector headers are used.
@@ -191,8 +204,9 @@ implementation. They cover thread affinity, cancellation, capacity, failure,
 deadline-versus-wait-timeout distinction, fatal owner retention and credit
 lifetime. Fatal retention runs in a test-owned child process because process
 death is deliberately its final cleanup owner. The C smoke test separately
-proves real native linkage, the public unsupported-query outcome, rejection of
-a second simultaneous runtime, and GPU runtime shutdown/recreation with the
+proves real native linkage, rejection of an unbound/malformed plan, that a
+prepared non-startable query rejects `start` without running, rejection of a
+second simultaneous runtime, and GPU runtime shutdown/recreation with the
 default two workers followed by one worker.
 
 ### Foundation lifecycle review
@@ -207,6 +221,6 @@ The deadline regression is tested with a driver that returns normally when its
 deadline expires, followed by successful cleanup. These checks cover the
 foundation's ownership and scheduling contracts, not the future GPU data path.
 
-The four-stage native round is not complete until a C caller can feed actual
-MO inputs, run an admitted TAE query, drain bounded results, and cancel the full
-data path. No SF10 or all-22 claim follows from these foundation tests.
+The embedded data path is not complete until a C caller can feed actual MO
+inputs, execute an admitted TAE query, drain bounded results, and cancel the
+full data path. No SF10 or all-22 claim follows from these stage-5 tests.

@@ -732,9 +732,8 @@ void SiriusRegistration::GPUExecutionFunction(ClientContext& context,
       }
       gstate.res = cpu_replay.take();
     }
-    auto outcome = gstate.res && !gstate.res->HasError()
-                     ? ::sirius::execution_outcome::SUCCEEDED
-                     : ::sirius::execution_outcome::FAILED;
+    auto outcome = gstate.res && !gstate.res->HasError() ? ::sirius::execution_outcome::SUCCEEDED
+                                                         : ::sirius::execution_outcome::FAILED;
     (void)gstate.execution_evidence->finish(outcome);
     auto end      = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);

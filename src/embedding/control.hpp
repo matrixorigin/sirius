@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "embedding/buffer_budget.hpp"
 #include "sirius_c.h"
 
 #include <array>
@@ -17,10 +18,35 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace sirius::embedding {
 class native_input;
 struct input_registry;
+struct query_state;
+struct owned_column {
+  uint32_t oid{};
+  int32_t width{}, scale{};
+  bool nullable{};
+  std::string name;
+};
+struct owned_read_column {
+  owned_column logical;
+  uint64_t physical_column_id{};
+  uint32_t sequence_number{};
+};
+struct owned_query_contract {
+  uint32_t account_id{};
+  std::string query_id;
+  std::array<uint8_t, 12> snapshot_ts{};
+  std::vector<owned_column> outputs;
+};
+struct owned_read_binding {
+  uint64_t binding_id{};
+  uint32_t source_kind{};
+  std::string database_name, table_name, schema_name, manifest, data_root;
+  std::vector<owned_read_column> columns;
+};
 using clock = std::chrono::steady_clock;
 void assign_error(sirius_error& out, sirius_status code, const char* message) noexcept;
 sirius_error current_error() noexcept;
@@ -40,17 +66,27 @@ class query_driver {
   virtual ~query_driver()                                            = default;
   virtual void run(std::stop_token stop, clock::time_point deadline) = 0;
   virtual void finish()                                              = 0;
+  virtual bool startable() const noexcept { return true; }
 };
 
 class engine_backend {
  public:
   virtual ~engine_backend() = default;
+  virtual std::size_t metadata_capacity_bytes() const noexcept { return 256u << 20; }
   virtual std::unique_ptr<query_driver> prepare_inputs(std::string_view plan,
                                                        input_registry& inputs,
                                                        std::stop_token stop,
                                                        clock::time_point deadline)
   {
     return prepare(plan, stop, deadline);
+  }
+  virtual std::unique_ptr<query_driver> prepare_bound(std::string_view plan,
+                                                      query_state const&,
+                                                      input_registry& inputs,
+                                                      std::stop_token stop,
+                                                      clock::time_point deadline)
+  {
+    return prepare_inputs(plan, inputs, stop, deadline);
   }
   virtual std::unique_ptr<query_driver> prepare(std::string_view plan,
                                                 std::stop_token stop,
@@ -77,6 +113,11 @@ struct query_state {
   bool started{false};
   sirius_error result{};
   std::size_t slot{0};
+  std::size_t metadata_bytes{0};
+  std::vector<buffer_budget::lease> metadata_leases;
+  bool startable{false};
+  std::unique_ptr<owned_query_contract> contract;
+  std::vector<owned_read_binding> bindings;
 };
 
 // Bounded single-owner coordinator, independent of DuckDB/CUDA for deterministic
@@ -105,6 +146,8 @@ class engine_control {
                                                uint64_t id,
                                                const sirius_input_column* columns,
                                                uint32_t count);
+  void bind_query(std::shared_ptr<query_state> const&, const sirius_query_contract&);
+  void register_read(std::shared_ptr<query_state> const&, const sirius_read_binding&);
 
  private:
   void worker() noexcept;
@@ -121,7 +164,10 @@ class engine_control {
   bool initialized_{false}, accepting_{true}, unavailable_{false};
   bool exit_requested_{false}, exited_{false};
   sirius_error initialization_error_{};
+  std::unique_ptr<buffer_budget> metadata_budget_;
 };
+
+void validate_embedded_plan(std::string_view plan, query_state const& query);
 
 engine_control::factory native_backend_factory(std::string config_path, uint32_t gpu_streams);
 }  // namespace sirius::embedding

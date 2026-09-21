@@ -34,6 +34,11 @@
 #include <string>
 #include <vector>
 
+namespace sirius::embedding {
+struct query_state;
+struct input_registry;
+}  // namespace sirius::embedding
+
 #ifndef SIRIUS_FFI_EXPORT
 #define SIRIUS_FFI_EXPORT __attribute__((visibility("default")))
 #endif
@@ -41,6 +46,7 @@
 namespace sirius::ffi {
 
 class Fragment;
+class EmbeddedPrepared;
 
 /// RAII handle to a Sirius engine context.
 ///
@@ -72,6 +78,13 @@ class SIRIUS_FFI_EXPORT Context {
   /// translation or execution failure. The stream keeps the database context alive until
   /// released; its last release can tear down the engine on the releasing thread.
   void execute_substrait(const std::string& plan, std::uintptr_t out_stream_addr);
+  std::size_t embedded_metadata_capacity_bytes() const noexcept;
+  std::size_t embedded_tae_host_staging_bytes() const noexcept;
+  std::unique_ptr<EmbeddedPrepared> prepare_embedded(const std::string& plan,
+                                                     embedding::query_state const& query,
+                                                     embedding::input_registry& inputs);
+
+  friend class EmbeddedPrepared;
 
  private:
   struct Impl;
@@ -79,6 +92,20 @@ class SIRIUS_FFI_EXPORT Context {
 
   friend class Fragment;
   friend SIRIUS_FFI_EXPORT std::unique_ptr<Fragment> make_fragment(Context& context);
+};
+
+class SIRIUS_FFI_EXPORT EmbeddedPrepared {
+ public:
+  ~EmbeddedPrepared();
+  void finish();
+  EmbeddedPrepared(EmbeddedPrepared const&)            = delete;
+  EmbeddedPrepared& operator=(EmbeddedPrepared const&) = delete;
+
+ private:
+  struct Impl;
+  explicit EmbeddedPrepared(std::unique_ptr<Impl>);
+  std::unique_ptr<Impl> impl_;
+  friend class Context;
 };
 
 /// One plan fragment of a multi-fragment query, executed on this process's [`Context`].

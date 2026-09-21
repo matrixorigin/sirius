@@ -47,8 +47,9 @@ void split_connector::push_split_sized(std::unique_ptr<op::operator_data>&& spli
                                        size_t preparation_bytes)
 {
   {
-    std::lock_guard<std::mutex> lock(_mutex);
-    assert(!_closed && "push_split after close() is forbidden");
+    std::unique_lock<std::mutex> lock(_mutex);
+    _space.wait(lock, [this] { return _closed || _splits.size() < max_ready_splits_; });
+    if (_closed) return;
     _splits.emplace_back();
     _splits.back() = {std::move(split), preparation_bytes};
     // A zero estimate means unknown, not empty; latch it so the total remains conservative.
@@ -85,6 +86,7 @@ void split_connector::close(std::exception_ptr const& exception)
     if (exception && !_exception) { _exception = exception; }
   }
   _cv.notify_all();
+  _space.notify_all();
 }
 
 std::optional<std::unique_ptr<op::operator_data>> split_connector::get_next_split()
@@ -96,6 +98,7 @@ std::optional<std::unique_ptr<op::operator_data>> split_connector::get_next_spli
   if (!_splits.empty()) {
     auto split = std::move(_splits.front());
     _splits.pop_front();
+    _space.notify_one();
     _last_pop_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count(),
