@@ -22,11 +22,25 @@ struct embedded_mo_bind_data final : duckdb::TableFunctionData {
   }
 };
 
+// Query resources belong to Sirius, not the reusable storage manifest parser.
+// The carrier type identifies embedded mode even without optional sort metadata.
+struct embedded_tae_bind_data final : duckdb::TableFunctionData {
+  std::shared_ptr<const tae::TAEScanBindData> manifest;
+  std::shared_ptr<buffer_budget> host_budget;
+  duckdb::unique_ptr<duckdb::FunctionData> Copy() const override
+  {
+    auto copy         = duckdb::make_uniq<embedded_tae_bind_data>();
+    copy->manifest    = manifest;
+    copy->host_budget = host_budget;
+    return copy;
+  }
+};
+
 struct embedded_binding {
   std::vector<std::string> names;
   std::vector<duckdb::LogicalType> types;
   std::shared_ptr<native_input> input;
-  std::shared_ptr<tae::TAEScanBindData> tae;
+  std::shared_ptr<const tae::TAEScanBindData> tae;
   std::shared_ptr<buffer_budget> tae_host_budget;
 };
 

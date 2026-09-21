@@ -19,6 +19,9 @@
 // incompatibility cannot silently pass on CPU.
 
 #include <catch.hpp>
+#include <duckdb/common/local_file_system.hpp>
+#include <embedding/plan_bindings.hpp>
+#include <op/scan/tae_gpu_ingestible.hpp>
 #include <utils/gpu_execution_fixture.hpp>
 
 #include <filesystem>
@@ -50,6 +53,69 @@ class TaeScanGpuFixture : public sirius::test::GpuExecutionFixture {
 };
 
 }  // namespace
+
+TEST_CASE_METHOD(TaeScanGpuFixture,
+                 "embedded TAE mode follows its binding and respects a one-block host budget",
+                 "[integration][gpu_execution][tae_scan][embedded_tae]")
+{
+  using namespace sirius::embedding;
+  auto const root = std::filesystem::path(tae_manifest("manifest_multi.json")).parent_path();
+  duckdb::LocalFileSystem fs;
+  tae::TAEObjectReader reader(fs, (root / "multi_block.tae").string());
+  reader.ReadMeta();
+  std::size_t block_bytes  = 0;
+  std::size_t object_bytes = 0;
+  for (auto const& block : reader.Meta().blocks) {
+    REQUIRE_FALSE(block.columns.empty());
+    block_bytes = std::max(block_bytes, static_cast<std::size_t>(block.columns[0].location.length));
+    object_bytes += block.columns[0].location.length;
+  }
+  REQUIRE(block_bytes > 0);
+  REQUIRE(object_bytes > block_bytes);
+
+  auto catalog = duckdb::make_shared_ptr<embedded_bind_catalog>();
+  con->context->registered_state->Insert(embedded_bind_catalog::key, catalog);
+  register_embedded_read_functions(duckdb::DatabaseInstance::GetDatabase(*con->context));
+  for (bool sorted : {false, true}) {
+    CAPTURE(sorted);
+    auto manifest = std::make_shared<tae::TAEScanBindData>();
+    auto json =
+      std::string(
+        R"({"database":"test_db","table":"test_multi","columns":[{"name":"col_int","oid":22}],"objects":[{"path":"multi_block.tae","rows":8,"blocks":2}])") +
+      (sorted ? R"(,"sort_column":"col_int"})" : "}");
+    tae::ParseManifestBytes(json, root.string(), *manifest);
+    auto budget = std::make_shared<buffer_budget>(block_bytes, 1);
+    embedded_binding binding;
+    binding.names           = {"col_int"};
+    binding.types           = {duckdb::LogicalType::INTEGER};
+    binding.tae             = std::move(manifest);
+    binding.tae_host_budget = budget;
+    auto const id           = sorted ? 2 : 1;
+    catalog->declare(id, std::move(binding));
+
+    run_ok("SET gpu_execution = true;");
+    auto before = sirius::test::get_transparent_execution_stats(*con);
+    auto gpu    = con->Query("SELECT col_int FROM sirius_embedded_tae_read(" + std::to_string(id) +
+                          ") ORDER BY col_int");
+    REQUIRE(gpu);
+    if (gpu->HasError()) UNSCOPED_INFO(gpu->GetError());
+    REQUIRE_FALSE(gpu->HasError());
+    auto after = sirius::test::get_transparent_execution_stats(*con);
+    sirius::test::require_transparent_execution_delta(before, after, 1, 0, 1);
+    auto usage = budget->inspect();
+    CHECK(usage.peak == block_bytes);
+    CHECK(usage.bytes == 0);
+    CHECK(usage.leases == 0);
+
+    run_ok("SET gpu_execution = false;");
+    auto cpu = con->Query("SELECT col_int FROM " + tae_scan(tae_manifest("manifest_multi.json")) +
+                          " ORDER BY col_int");
+    REQUIRE(cpu);
+    REQUIRE_FALSE(cpu->HasError());
+    CHECK(collect_rows(*gpu, false) == collect_rows(*cpu, false));
+  }
+  catalog->clear();
+}
 
 TEST_CASE_METHOD(TaeScanGpuFixture,
                  "gpu_execution executes tae_scan fixtures on GPU without DuckDB fallback",
