@@ -357,6 +357,10 @@ TEST_CASE("unprovable native cleanup retains owners and seals admission",
     if (control->prepare(q, 5s).code != SIRIUS_OK || control->start(q).code != SIRIUS_OK) _exit(2);
     if (control->wait(q, 5s).code != SIRIUS_GPU_UNAVAILABLE) _exit(3);
     if (q->phase != query_phase::UNAVAILABLE || r->destroyed != 0) _exit(4);
+    auto execution = control->inspect_execution(q);
+    if (!execution.terminal || !execution.fatal ||
+        execution.terminal_status != SIRIUS_GPU_UNAVAILABLE)
+      _exit(10);
     if (control->close_query(q, 0ms).code != SIRIUS_GPU_UNAVAILABLE) _exit(5);
     auto stats = control->inspect();
     if (!stats.unavailable || stats.accepting_queries || stats.live_queries != 1) _exit(6);
@@ -388,6 +392,10 @@ TEST_CASE("poisoned preparation cannot masquerade as unsupported",
     if (control->initialize().code != SIRIUS_OK) _exit(1);
     auto query = control->create("poisoned", 5s);
     if (control->prepare(query, 5s).code != SIRIUS_GPU_UNAVAILABLE) _exit(2);
+    auto execution = control->inspect_execution(query);
+    if (!execution.terminal || !execution.fatal ||
+        execution.terminal_status != SIRIUS_GPU_UNAVAILABLE)
+      _exit(7);
     auto stats = control->inspect();
     if (!stats.unavailable || stats.accepting_queries) _exit(3);
     if (control->close_query(query, 0ms).code != SIRIUS_GPU_UNAVAILABLE) _exit(4);

@@ -20,3 +20,5 @@ target_include_directories(sirius_embed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tae-
 target_sources(sirius_objects PRIVATE src/embedding/tae_demand.cpp)
 
 target_sources(sirius_objects PRIVATE src/embedding/result.cpp src/embedding/result_codec.cpp src/embedding/result_gpu.cpp)
+
+target_sources(sirius_objects PRIVATE src/embedding/execution_stats.cpp)

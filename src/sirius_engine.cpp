@@ -291,6 +291,7 @@ void sirius_engine::execute(std::stop_token stop, std::chrono::steady_clock::tim
     throw std::logic_error("execution requires a live window completion handler");
   }
   auto* registry                       = &sirius_ctx->get_query_lifecycle_registry();
+  completion_handler_->set_execution_stats(execution_stats_);
   completion_handler_->execution_owner = std::this_thread::get_id();
   auto future                          = completion_handler_->get_awaitable();
 

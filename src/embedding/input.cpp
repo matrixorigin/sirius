@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace sirius::embedding {
 static_assert(std::endian::native == std::endian::little);
@@ -81,8 +82,10 @@ void validate_input_schema(std::span<const sirius_input_column> columns)
 }
 input_batch::~input_batch()
 {
-  // Return pool blocks before announcing capacity to a blocked producer.
+  // Retire physical ownership, then the public gauge, before returned credit
+  // wakes a producer that can charge the same window again.
   storage.reset();
+  if (stats) stats->mo_input_release(charged_bytes);
   credit.reset();
   if (owner && !published) owner->release_filling();
 }
@@ -120,12 +123,14 @@ native_input::native_input(uint64_t binding,
                            std::stop_token stop,
                            clock::time_point deadline,
                            std::size_t bytes,
-                           std::size_t count)
+                           std::size_t count,
+                           std::shared_ptr<execution_stats> stats)
   : schema(std::move(columns)),
     id(binding),
     capacity(bytes),
     stop_(stop),
     deadline_(deadline),
+    stats_(std::move(stats)),
     budget_(bytes, count),
     cancel_(stop, [this] { this->stop(); })
 {
@@ -164,6 +169,7 @@ std::shared_ptr<input_batch> native_input::acquire(std::size_t bytes, clock::tim
   auto status = budget_.acquire(charged, stop_, clock::now(), credit);
   if (status == SIRIUS_TIMEOUT && until > clock::now()) {
     ++blocked_;
+    if (stats_) stats_->mo_input_blocked();
     status = budget_.acquire(charged, stop_, std::min(until, deadline_), credit);
   }
   if (status != SIRIUS_OK) {
@@ -172,6 +178,9 @@ std::shared_ptr<input_batch> native_input::acquire(std::size_t bytes, clock::tim
     throw failure(status, "native input capacity unavailable");
   }
   auto batch           = std::make_shared<input_batch>();
+  batch->stats         = stats_;
+  batch->charged_bytes = charged;
+  if (batch->stats) batch->stats->mo_input_retain(charged);
   batch->credit        = std::move(credit);
   batch->pool          = pool;
   batch->storage       = pool->allocate(allocated);
@@ -336,6 +345,7 @@ std::unique_ptr<input_unit> native_input::claim()
       empty->chars.resize(schema.size());
       empty->nulls.resize(schema.size());
       empty_claimed_ = true;
+      if (stats_) stats_->mo_input_unit();
       return empty;
     }
     pending.assign(queue_.begin(), queue_.end());
@@ -405,6 +415,7 @@ std::unique_ptr<input_unit> native_input::claim()
       }
     }
   }
+  if (stats_) stats_->mo_input_unit();
   return unit;
 }
 void input_registry::stop()

@@ -6,10 +6,12 @@
 namespace sirius::embedding {
 result_batch::~result_batch()
 {
-  // Return credit only after freeing physical storage and descriptors.
+  // Retire physical ownership, then the public gauge, before returned credit
+  // wakes a publisher that can charge the same window again.
   storage.reset();
   columns.reset();
   pool.reset();
+  if (stats) stats->result_release(charged_bytes);
   credit.reset();
   if (owner) owner->released(state);
 }
@@ -55,10 +57,14 @@ sirius_status native_result::try_allocate(std::size_t bytes,
     if (status == SIRIUS_TIMEOUT) {
       std::lock_guard lock(mutex_);
       ++blocked_;
+      if (stats_) stats_->result_blocked();
     }
     return status;
   }
-  auto batch    = std::make_shared<result_batch>();
+  auto batch           = std::make_shared<result_batch>();
+  batch->stats         = stats_;
+  batch->charged_bytes = charge;
+  if (batch->stats) batch->stats->result_retain(charge);
   batch->credit = std::move(credit);
   batch->pool   = pool;
   if (bytes) batch->storage = pool->allocate(bytes);
@@ -82,10 +88,13 @@ void native_result::publish(std::shared_ptr<result_batch> batch)
     if (!batch || batch->owner.get() != this || batch->state != result_batch::phase::filling ||
         size_ == queue_.size())
       throw failure(SIRIUS_INVALID_STATE, "invalid result publication");
-    batch->state = result_batch::phase::queued;
+    auto const rows    = batch->rows;
+    auto const payload = batch->payload_bytes;
+    batch->state       = result_batch::phase::queued;
     --filling_;
     queue_[(head_ + size_) % queue_.size()] = std::move(batch);
     ++size_;
+    if (stats_) stats_->result_publish(rows, payload);
   }
   changed_.notify_all();
 }
@@ -149,6 +158,7 @@ void native_result::parked(bool value)
     assert(parked_);
     --parked_;
   }
+  if (stats_) stats_->result_parked(value);
 }
 void native_result::released(result_batch::phase state) noexcept
 {

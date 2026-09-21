@@ -2,6 +2,7 @@
 #pragma once
 
 #include "embedding/buffer_budget.hpp"
+#include "embedding/execution_stats.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -44,6 +45,7 @@ class tae_work_permit final {
   std::size_t staging_bytes() const noexcept { return credit_.bytes(); }
   std::size_t metadata_bytes() const noexcept;
   std::size_t chunk_limit(std::size_t chunk_size) const noexcept;
+  void record_payload_bytes(std::size_t bytes) const noexcept;
   // Only the admitted task installs storage. Its execution lease outlives a
   // replaced/destroyed scan input until stream retirement (including retry).
   void retain_staging(std::shared_ptr<void> storage) { storage_ = std::move(storage); }
@@ -71,7 +73,8 @@ class tae_demand_controller final {
 
   tae_demand_controller(std::size_t gpu_streams,
                         std::shared_ptr<buffer_budget> host_budget,
-                        std::size_t host_capacity = tae_host_capacity);
+                        std::size_t host_capacity              = tae_host_capacity,
+                        std::shared_ptr<execution_stats> stats = {});
   ~tae_demand_controller();
   tae_demand_controller(tae_demand_controller const&)            = delete;
   tae_demand_controller& operator=(tae_demand_controller const&) = delete;
@@ -93,5 +96,6 @@ class tae_demand_controller final {
 std::shared_ptr<tae_demand_controller> make_tae_demand_controller(
   std::size_t gpu_streams,
   std::shared_ptr<buffer_budget> host_budget,
-  std::size_t host_capacity = tae_host_capacity);
+  std::size_t host_capacity              = tae_host_capacity,
+  std::shared_ptr<execution_stats> stats = {});
 }  // namespace sirius::embedding

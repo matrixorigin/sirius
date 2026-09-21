@@ -56,8 +56,10 @@ TEST_CASE("full converter admission parks before claiming GPU work and respects 
   auto telemetry     = test::make_test_telemetry_context();
   pipeline::gpu_pipeline_executor executor(
     config, space, channel.make_publisher(), nullptr, telemetry);
-  auto state      = std::make_shared<pipeline::gpu_pipeline_task_global_state>(nullptr, telemetry);
-  auto completion = std::make_shared<pipeline::completion_handler>();
+  auto state = std::make_shared<pipeline::gpu_pipeline_task_global_state>(nullptr, telemetry);
+  auto stats = std::make_shared<embedding::execution_stats>();
+  stats->add_source(SIRIUS_READ_TAE);
+  auto completion = std::make_shared<pipeline::completion_handler>(stats);
   state->set_completion_handler(completion);
   auto done = completion->get_awaitable();
   admission_task task(state);
@@ -82,6 +84,9 @@ TEST_CASE("full converter admission parks before claiming GPU work and respects 
   REQUIRE(executor.try_admit(task));
   REQUIRE(local->reservation());
   CHECK(local->reservation()->size() >= task.retry_floor);
+  auto snapshot = stats->inspect();
+  CHECK(snapshot.tae_gpu_admission_waits == 2);
+  CHECK(snapshot.tae_peak_gpu_reservation_admitted_bytes >= task.retry_floor);
   local->release_reservation().reset();
   task.retry_floor = space->get_max_memory() + 1;
   CHECK(executor.try_admit(task));  // Remove the failed task instead of waiting forever.

@@ -95,6 +95,10 @@ class sirius_engine {
   //! Execute the sirius engine
   void execute();
   void execute(std::stop_token stop, std::chrono::steady_clock::time_point deadline);
+  void set_execution_stats(std::shared_ptr<embedding::execution_stats> stats)
+  {
+    execution_stats_ = std::move(stats);
+  }
   void report_execution_error(std::exception_ptr error);
   //! Reset the sirius engine
   void reset();
@@ -128,6 +132,7 @@ class sirius_engine {
   /// (in sirius_interface::cleanup_internal) before the query's cleanup drains the task queues,
   /// so a task still unwinding must be able to report without touching freed memory.
   std::shared_ptr<pipeline::completion_handler> completion_handler_;
+  std::shared_ptr<embedding::execution_stats> execution_stats_;
   std::mutex completion_mutex_;
   std::shared_ptr<const telemetry::telemetry_context> telemetry_context_;
   quent::DynamicFsmHandle<quent::Query> query_handle_;

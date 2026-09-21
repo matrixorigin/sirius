@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include "embedding/execution_stats.hpp"
 
 #include "scan_manager/preparation.hpp"
 #include "transparent/replay_admission.hpp"
@@ -43,6 +44,7 @@ namespace sirius::pipeline {
  */
 class completion_handler {
  public:
+  explicit completion_handler(std::shared_ptr<embedding::execution_stats> stats) : execution_stats_(std::move(stats)) {}
   explicit completion_handler(std::function<void(std::exception_ptr)> on_error = {})
     : on_error_(std::move(on_error))
   {
@@ -281,7 +283,26 @@ class completion_handler {
     return _fatal_error;
   }
 
+  void set_execution_stats(std::shared_ptr<embedding::execution_stats> stats) { execution_stats_ = std::move(stats); }
+  void gpu_task_started() const noexcept
+  {
+    if (execution_stats_) execution_stats_->gpu_task_started();
+  }
+  void gpu_task_completed() const noexcept
+  {
+    if (execution_stats_) execution_stats_->gpu_task_completed();
+  }
+  void tae_gpu_admission_waited() const noexcept
+  {
+    if (execution_stats_) execution_stats_->tae_gpu_admission_wait();
+  }
+  void tae_gpu_reservation_admitted(std::size_t bytes) const noexcept
+  {
+    if (execution_stats_) execution_stats_->tae_gpu_reservation(bytes);
+  }
+
  private:
+  std::shared_ptr<embedding::execution_stats> execution_stats_;
   // terminal -> failure -> publication. Never hold these locks while draining workers.
   void finish_error(std::exception_ptr error,
                     transparent::late_failure_cause fallback,

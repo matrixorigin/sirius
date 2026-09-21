@@ -431,10 +431,12 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
                                      impl_->embedded_tae_host_staging,
                                      std::max<std::size_t>(2, 2 * impl_->embedded_gpu_streams))
                                  : nullptr;
-  auto tae_demand =
-    has_tae ? embedding::make_tae_demand_controller(
-                impl_->embedded_gpu_streams, tae_host_budget, impl_->embedded_tae_host_staging)
-            : nullptr;
+  auto tae_demand      = has_tae
+                           ? embedding::make_tae_demand_controller(impl_->embedded_gpu_streams,
+                                                              tae_host_budget,
+                                                              impl_->embedded_tae_host_staging,
+                                                              query.stats)
+                           : nullptr;
   impl_->conn->BeginTransaction();
   std::vector<std::string> views;
   std::unique_ptr<EmbeddedPrepared::Impl> owner;
@@ -519,6 +521,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
       *impl_->conn->context, std::optional<std::string>("native_embedded"));
     owner->engine = std::make_unique<sirius::sirius_engine>(
       *impl_->conn->context, *owner->interface, owner->scope->query_id());
+    owner->engine->set_execution_stats(query.stats);
     owner->publisher = std::make_shared<embedding::result_publisher>(
       query.results,
       query.contract->outputs,

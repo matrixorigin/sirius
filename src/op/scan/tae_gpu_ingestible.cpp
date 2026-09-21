@@ -164,6 +164,7 @@ void upload_embedded_payload(tae_scan_info const& info,
                                                std::uint64_t(chunk.extent.offset) + done,
                                                chunk.pinned_length - done,
                                                {info.staging->data(), info.staging->size()});
+      info.work_permit->record_payload_bytes(n);
       CUDF_CUDA_TRY(cudaMemcpyAsync(static_cast<std::uint8_t*>(device) + chunk.pinned_offset + done,
                                     info.staging->data(),
                                     n,

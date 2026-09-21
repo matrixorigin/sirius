@@ -31,12 +31,14 @@ class native_input;
 struct input_batch {
   ~input_batch();
   std::shared_ptr<native_input> owner;
+  std::shared_ptr<execution_stats> stats;
   buffer_budget::lease credit;
   std::shared_ptr<input_pool> pool;
   std::unique_ptr<input_storage> storage;
   std::vector<sirius_input_vector> columns;
   uint32_t rows{0};
   std::size_t payload_bytes{0};
+  std::size_t charged_bytes{0};
   bool published{false};
   void write(std::size_t offset, std::span<const std::byte> bytes);
   bool is_null(std::size_t column, uint32_t row) const;
@@ -61,8 +63,9 @@ class native_input : public std::enable_shared_from_this<native_input> {
                std::vector<sirius_input_column> schema,
                std::stop_token stop,
                clock::time_point deadline,
-               std::size_t capacity = input_window,
-               std::size_t count    = 128);
+               std::size_t capacity                   = input_window,
+               std::size_t count                      = 128,
+               std::shared_ptr<execution_stats> stats = {});
   void activate(std::shared_ptr<input_pool> pool);
   std::shared_ptr<input_batch> acquire(std::size_t bytes, clock::time_point wait_until);
   void publish(std::shared_ptr<input_batch> const&,
@@ -88,6 +91,7 @@ class native_input : public std::enable_shared_from_this<native_input> {
   void notify() const;
   std::stop_token stop_;
   clock::time_point deadline_;
+  std::shared_ptr<execution_stats> stats_;
   mutable std::mutex mutex_;
   std::mutex claim_mutex_;
   std::shared_ptr<input_pool> pool_;
