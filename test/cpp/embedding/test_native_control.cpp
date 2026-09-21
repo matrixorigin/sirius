@@ -43,6 +43,7 @@ struct recording {
   bool fail_run{false};
   bool fail_finish{false};
   bool startable{true};
+  bool runtime_available{true};
 };
 class test_driver final : public query_driver {
  public:
@@ -92,8 +93,13 @@ class test_backend final : public engine_backend {
   {
     ++r_->prepared;
     if (plan == "bad") throw failure(SIRIUS_INVALID_ARGUMENT, "invalid test plan");
+    if (plan == "poisoned") {
+      r_->runtime_available = false;
+      throw failure(SIRIUS_UNSUPPORTED, "failure after execution-window health was poisoned");
+    }
     return std::make_unique<test_driver>(r_);
   }
+  bool available() const noexcept override { return r_->runtime_available; }
 
  private:
   std::shared_ptr<recording> r_;
@@ -314,6 +320,36 @@ TEST_CASE("unprovable native cleanup retains owners and seals admission",
     _exit(0);
   }
   int status = 0;
+  REQUIRE(waitpid(pid, &status, 0) == pid);
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("poisoned preparation cannot masquerade as unsupported",
+          "[native_control][fatal_process]")
+{
+  auto pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    alarm(10);
+    auto record = std::make_shared<recording>();
+    auto* control =
+      new engine_control([record] { return std::make_unique<test_backend>(record); }, 1);
+    if (control->initialize().code != SIRIUS_OK) _exit(1);
+    auto query = control->create("poisoned", 5s);
+    if (control->prepare(query, 5s).code != SIRIUS_GPU_UNAVAILABLE) _exit(2);
+    auto stats = control->inspect();
+    if (!stats.unavailable || stats.accepting_queries) _exit(3);
+    if (control->close_query(query, 0ms).code != SIRIUS_GPU_UNAVAILABLE) _exit(4);
+    try {
+      control->create("ok", 5s);
+      _exit(5);
+    } catch (failure const& e) {
+      if (e.error.code != SIRIUS_GPU_UNAVAILABLE) _exit(6);
+    }
+    _exit(0);
+  }
+  int status{};
   REQUIRE(waitpid(pid, &status, 0) == pid);
   REQUIRE(WIFEXITED(status));
   REQUIRE(WEXITSTATUS(status) == 0);

@@ -101,6 +101,53 @@ TEST_CASE("embedded plan admission rejects schema and arbitrary reads", "[native
                     sirius::embedding::failure);
 }
 
+TEST_CASE("embedded admission preserves allowed sort selections and scalar filters",
+          "[native_binding]")
+{
+  auto query     = bound_query();
+  auto selection = [](substrait::Expression* expression) {
+    auto* reference = expression->mutable_selection();
+    reference->mutable_direct_reference()->mutable_struct_field()->set_field(0);
+    reference->mutable_root_reference();
+  };
+  SECTION("sort selection")
+  {
+    auto plan              = one_read();
+    auto* root             = plan.mutable_relations(0)->mutable_root();
+    substrait::Rel input   = root->input();
+    auto* sort             = root->mutable_input()->mutable_sort();
+    *sort->mutable_input() = input;
+    auto* key              = sort->add_sorts();
+    key->set_direction(substrait::SortField::SORT_DIRECTION_ASC_NULLS_FIRST);
+    selection(key->mutable_expr());
+    REQUIRE_NOTHROW(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query));
+    key->mutable_expr()->mutable_window_function();
+    REQUIRE_THROWS_AS(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query),
+                      sirius::embedding::failure);
+  }
+  SECTION("scalar filter retains function whitelist")
+  {
+    auto plan     = one_read();
+    auto* mapping = plan.add_extensions()->mutable_extension_function();
+    mapping->set_function_anchor(1);
+    mapping->set_name("gt:i64_i64");
+    auto* root               = plan.mutable_relations(0)->mutable_root();
+    substrait::Rel input     = root->input();
+    auto* filter             = root->mutable_input()->mutable_filter();
+    *filter->mutable_input() = input;
+    auto* function           = filter->mutable_condition()->mutable_scalar_function();
+    function->set_function_reference(1);
+    selection(function->add_arguments()->mutable_value());
+    function->add_arguments()->mutable_value()->mutable_literal()->set_i64(1);
+    function->mutable_output_type()->mutable_bool_()->set_nullability(
+      substrait::Type::NULLABILITY_REQUIRED);
+    REQUIRE_NOTHROW(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query));
+    mapping->set_name("unregistered_function:i64_i64");
+    REQUIRE_THROWS_AS(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query),
+                      sirius::embedding::failure);
+  }
+}
+
 TEST_CASE("embedded TAE manifest bytes are bounded and path confined", "[native_binding][tae]")
 {
   constexpr std::string_view manifest =

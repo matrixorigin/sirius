@@ -27,10 +27,11 @@
  */
 
 #pragma once
-
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,7 @@ class SIRIUS_FFI_EXPORT Context {
   void execute_substrait(const std::string& plan, std::uintptr_t out_stream_addr);
   std::size_t embedded_metadata_capacity_bytes() const noexcept;
   std::size_t embedded_tae_host_staging_bytes() const noexcept;
+  bool embedded_runtime_available() const noexcept;
   std::unique_ptr<EmbeddedPrepared> prepare_embedded(const std::string& plan,
                                                      embedding::query_state const& query,
                                                      embedding::input_registry& inputs);
@@ -97,6 +99,7 @@ class SIRIUS_FFI_EXPORT Context {
 class SIRIUS_FFI_EXPORT EmbeddedPrepared {
  public:
   ~EmbeddedPrepared();
+  void run(std::stop_token, std::chrono::steady_clock::time_point);
   void finish();
   EmbeddedPrepared(EmbeddedPrepared const&)            = delete;
   EmbeddedPrepared& operator=(EmbeddedPrepared const&) = delete;

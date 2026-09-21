@@ -36,8 +36,10 @@
 
 #include <cucascade/data/data_repository_manager.hpp>
 
+#include <chrono>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -92,6 +94,8 @@ class sirius_engine {
   void initialize_internal(op::sirius_physical_operator& physical_result_collector);
   //! Execute the sirius engine
   void execute();
+  void execute(std::stop_token stop, std::chrono::steady_clock::time_point deadline);
+  void report_execution_error(std::exception_ptr error);
   //! Reset the sirius engine
   void reset();
   //! Cancel the tasks
@@ -124,6 +128,7 @@ class sirius_engine {
   /// (in sirius_interface::cleanup_internal) before the query's cleanup drains the task queues,
   /// so a task still unwinding must be able to report without touching freed memory.
   std::shared_ptr<pipeline::completion_handler> completion_handler_;
+  std::mutex completion_mutex_;
   std::shared_ptr<const telemetry::telemetry_context> telemetry_context_;
   quent::DynamicFsmHandle<quent::Query> query_handle_;
 };

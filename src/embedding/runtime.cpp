@@ -3,6 +3,7 @@
  */
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "sirius_ffi.hpp"
 
 #include <algorithm>
@@ -34,15 +35,15 @@ class native_backend final : public engine_backend {
                                         std::stop_token,
                                         clock::time_point) override
   {
-    // This foundation advertises only ENGINE_CONTROL. Stages 4-6 install the
-    // bounded sources and sink before advertising executable native queries.
+    // Execution requires a checked query contract and registered input bindings.
     // Never fall through to Context::execute_substrait's eager result path.
-    throw failure(SIRIUS_UNSUPPORTED, "bounded native query adapters are not installed");
+    throw failure(SIRIUS_UNSUPPORTED, "native queries require a bound query contract");
   }
   std::size_t metadata_capacity_bytes() const noexcept override
   {
     return context_->embedded_metadata_capacity_bytes();
   }
+  bool available() const noexcept override { return context_->embedded_runtime_available(); }
 
   std::unique_ptr<query_driver> prepare_bound(std::string_view plan,
                                               query_state const& query,
@@ -86,7 +87,11 @@ class native_backend final : public engine_backend {
       throw;
     } catch (failure const&) {
       throw;
+    } catch (pipeline::gpu_stream_quiescence_error const&) {
+      throw;
     } catch (std::exception const& e) {
+      if (!context_->embedded_runtime_available())
+        throw failure(SIRIUS_GPU_UNAVAILABLE, "native preparation poisoned the runtime");
       throw failure(SIRIUS_UNSUPPORTED, e.what());
     }
     class prepared_driver final : public query_driver {
@@ -94,7 +99,10 @@ class native_backend final : public engine_backend {
       explicit prepared_driver(std::unique_ptr<ffi::EmbeddedPrepared> plan) : plan_(std::move(plan))
       {
       }
-      void run(std::stop_token, clock::time_point) override {}
+      void run(std::stop_token stop, clock::time_point deadline) override
+      {
+        plan_->run(stop, deadline);
+      }
       void finish() override
       {
         if (plan_) {
@@ -102,12 +110,19 @@ class native_backend final : public engine_backend {
           plan_.reset();
         }
       }
-      bool startable() const noexcept override { return false; }
+      bool startable() const noexcept override { return true; }
 
      private:
       std::unique_ptr<ffi::EmbeddedPrepared> plan_;
     };
-    return std::make_unique<prepared_driver>(std::move(prepared));
+    try {
+      return std::make_unique<prepared_driver>(std::move(prepared));
+    } catch (...) {
+      prepared.reset();
+      if (!context_->embedded_runtime_available())
+        throw failure(SIRIUS_GPU_UNAVAILABLE, "native prepared-owner cleanup poisoned the runtime");
+      throw;
+    }
   }
 
  private:

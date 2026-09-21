@@ -239,7 +239,7 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
       case substrait::Expression::kIfThen:
       case substrait::Expression::kCast:
       case substrait::Expression::kSingularOrList:
-      case substrait::Expression::kNested:
+      case substrait::Expression::kNested: break;
       default: throw failure(SIRIUS_UNSUPPORTED, "unsupported Substrait expression");
     }
   } else if (name == "substrait.Expression.ScalarFunction") {
