@@ -110,6 +110,10 @@ class scan_info : public std::enable_shared_from_this<scan_info> {
 
   virtual ~scan_info() = default;
 
+  [[nodiscard]] virtual std::size_t mandatory_gpu_reservation_bytes() const noexcept { return 0; }
+  virtual void gpu_admitted(std::size_t) const {}
+  virtual std::shared_ptr<void> execution_lease() const { return {}; }
+
   [[nodiscard]] std::span<const fadvise_entry> fadvise_hints() const { return _hints; }
 
   [[nodiscard]] std::span<const std::shared_ptr<sirius::io::sirius_datasource>> datasources() const

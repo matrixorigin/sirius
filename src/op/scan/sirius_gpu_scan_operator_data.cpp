@@ -564,6 +564,24 @@ std::size_t scan_operator_input::get_estimated_size_in_bytes() const
   return 0;
 }
 
+std::size_t scan_operator_input::mandatory_gpu_reservation_bytes() const noexcept
+{
+  auto const* info = std::get_if<std::unique_ptr<scan_info>>(&materialization_info);
+  return info && *info ? (*info)->mandatory_gpu_reservation_bytes() : 0;
+}
+
+std::shared_ptr<void> scan_operator_input::execution_lease() const
+{
+  auto info = std::get_if<std::unique_ptr<scan_info>>(&materialization_info);
+  return info && *info ? (*info)->execution_lease() : nullptr;
+}
+
+void scan_operator_input::gpu_admitted(std::size_t bytes) const
+{
+  auto const* info = std::get_if<std::unique_ptr<scan_info>>(&materialization_info);
+  if (info && *info) (*info)->gpu_admitted(bytes);
+}
+
 std::size_t scan_operator_input::get_estimated_working_set_size_in_bytes() const
 {
   if (std::holds_alternative<std::shared_ptr<scan_info>>(materialization_info)) {

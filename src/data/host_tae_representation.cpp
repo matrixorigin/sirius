@@ -72,6 +72,7 @@ host_tae_representation::host_tae_representation(
 host_tae_representation::host_tae_representation(const host_tae_representation& other)
   : idata_representation(const_cast<cucascade::memory::memory_space&>(other.get_memory_space())),
     _host_data(other._host_data),
+    _device_loader(other._device_loader),
     _chunks(other._chunks),
     _total_rows(other._total_rows),
     _compressed_bytes(other._compressed_bytes),

@@ -94,7 +94,45 @@ __global__ void scatter_chars_kernel(const uint8_t* __restrict__ varlena_base,
   }
 }
 
+__global__ void validate_layout_kernel(const uint8_t* varlena,
+                                       const uint8_t* area_length,
+                                       uint32_t rows,
+                                       std::size_t available_area,
+                                       uint64_t* result)
+{
+  uint32_t area;
+  memcpy(&area, area_length, sizeof(area));
+  if (area > available_area) atomicExch(reinterpret_cast<unsigned long long*>(result + 1), 1ULL);
+  for (uint32_t row = blockIdx.x * blockDim.x + threadIdx.x; row < rows;
+       row += gridDim.x * blockDim.x) {
+    auto const* value = varlena + std::size_t(row) * VARLENA_SIZE;
+    uint32_t length   = value[0];
+    if (length > VARLENA_INLINE_MAX) {
+      uint32_t offset;
+      memcpy(&offset, value + 4, sizeof(offset));
+      memcpy(&length, value + 8, sizeof(length));
+      if (offset > area || length > area - offset)
+        atomicExch(reinterpret_cast<unsigned long long*>(result + 1), 1ULL);
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(result),
+              static_cast<unsigned long long>(length));
+  }
+}
+
 }  // anonymous namespace
+
+void validate_varchar_layout(const uint8_t* varlena,
+                             const uint8_t* area_length,
+                             uint32_t rows,
+                             std::size_t available_area,
+                             uint64_t* result,
+                             rmm::cuda_stream_view stream)
+{
+  if (!rows) return;
+  auto const blocks = (rows + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  validate_layout_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
+    varlena, area_length, rows, available_area, result);
+}
 
 void decode_varchar_offsets(const uint8_t* d_varlena_base,
                             const uint8_t* d_area_base,

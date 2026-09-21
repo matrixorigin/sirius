@@ -32,6 +32,7 @@
 
 // standard library
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -62,7 +63,8 @@ struct pinned_host_buffer {
 
   pinned_host_buffer() = default;
 
-  explicit pinned_host_buffer(std::size_t n) : _size(n), _pinned(n >= PINNED_THRESHOLD)
+  explicit pinned_host_buffer(std::size_t n, bool force_pinned = false)
+    : _size(n), _pinned(force_pinned || n >= PINNED_THRESHOLD)
   {
     if (n > 0) {
       if (_pinned) {
@@ -203,6 +205,11 @@ class host_tae_representation : public cucascade::idata_representation {
   [[nodiscard]] auto const& get_host_data() const { return _host_data; }
   [[nodiscard]] auto const& get_column_chunks() const { return _chunks; }
   [[nodiscard]] std::size_t get_total_rows() const { return _total_rows; }
+  using device_loader = std::function<void(void*, std::size_t, rmm::cuda_stream_view)>;
+  // Embedded file descriptors assemble compressed input directly on the GPU
+  // through bounded host slices. Legacy/MO callers keep the contiguous path.
+  void set_device_loader(device_loader loader) { _device_loader = std::move(loader); }
+  [[nodiscard]] device_loader const& get_device_loader() const { return _device_loader; }
   void mark_h2d_complete() noexcept
   {
     if (_input_lease) { _input_lease->mark_h2d_complete(); }
@@ -226,6 +233,7 @@ class host_tae_representation : public cucascade::idata_representation {
   // is released and the prefetched frame can be pulled.
   std::unique_ptr<host_tae_input_lease> _input_lease;
   std::shared_ptr<pinned_host_buffer> _host_data;
+  device_loader _device_loader;
 
   std::vector<column_chunk_info> _chunks;
   std::size_t _total_rows;

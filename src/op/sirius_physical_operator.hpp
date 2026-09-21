@@ -150,6 +150,12 @@ class operator_data {
    */
   [[nodiscard]] virtual bool is_resident() const noexcept { return false; }
 
+  // A nonzero floor is a required peak, not a history estimate. Embedded
+  // inputs must never read payload under a clamped or partial reservation.
+  [[nodiscard]] virtual std::size_t mandatory_gpu_reservation_bytes() const noexcept { return 0; }
+  virtual void gpu_admitted(std::size_t) const {}
+  virtual std::shared_ptr<void> execution_lease() const { return {}; }
+
   /**
    * @brief Per-task preparation hook invoked before the operator consumes this data.
    *

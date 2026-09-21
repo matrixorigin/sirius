@@ -55,7 +55,7 @@ class TaeScanGpuFixture : public sirius::test::GpuExecutionFixture {
 }  // namespace
 
 TEST_CASE_METHOD(TaeScanGpuFixture,
-                 "embedded TAE mode follows its binding and respects a one-block host budget",
+                 "embedded TAE mode follows its binding and respects bounded staging entitlements",
                  "[integration][gpu_execution][tae_scan][embedded_tae]")
 {
   using namespace sirius::embedding;
@@ -84,12 +84,15 @@ TEST_CASE_METHOD(TaeScanGpuFixture,
         R"({"database":"test_db","table":"test_multi","columns":[{"name":"col_int","oid":22}],"objects":[{"path":"multi_block.tae","rows":8,"blocks":2}])") +
       (sorted ? R"(,"sort_column":"col_int"})" : "}");
     tae::ParseManifestBytes(json, root.string(), *manifest);
-    auto budget = std::make_shared<buffer_budget>(block_bytes, 1);
+    constexpr std::size_t host_capacity = 4096;
+    auto budget                         = std::make_shared<buffer_budget>(host_capacity, 2);
+    auto demand                         = make_tae_demand_controller(1, budget, host_capacity);
     embedded_binding binding;
     binding.names           = {"col_int"};
     binding.types           = {duckdb::LogicalType::INTEGER};
     binding.tae             = std::move(manifest);
     binding.tae_host_budget = budget;
+    binding.tae_demand      = demand;
     auto const id           = sorted ? 2 : 1;
     catalog->declare(id, std::move(binding));
 
@@ -102,8 +105,10 @@ TEST_CASE_METHOD(TaeScanGpuFixture,
     REQUIRE_FALSE(gpu->HasError());
     auto after = sirius::test::get_transparent_execution_stats(*con);
     sirius::test::require_transparent_execution_delta(before, after, 1, 0, 1);
+    demand->close();
     auto usage = budget->inspect();
-    CHECK(usage.peak == block_bytes);
+    CHECK(usage.peak <= host_capacity);
+    CHECK(usage.peak >= 2048);
     CHECK(usage.bytes == 0);
     CHECK(usage.leases == 0);
 

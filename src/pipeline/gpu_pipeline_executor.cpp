@@ -22,6 +22,7 @@
 #include "cuda_runtime_api.h"
 #include "downgrade/downgrade_executor.hpp"
 #include "exec/leased_callable.hpp"
+#include "embedding/control.hpp"
 #include "log/logging.hpp"
 #include "op/scan/table_scan/scan_contract.hpp"
 #include "op/sirius_physical_operator.hpp"
@@ -119,6 +120,49 @@ sirius::exec::invocable<void() noexcept> gpu_pipeline_executor::get_per_thread_i
     }
     sirius::util::enable_log_on_default_stream();
   };
+}
+
+bool gpu_pipeline_executor::try_admit(gpu_pipeline_task& task)
+{
+  auto handler = task.get_completion_handler();
+  if (handler && handler->has_error()) { return true; }
+  try {
+    auto* local = dynamic_cast<gpu_pipeline_task_local_state*>(task.local_state());
+    if (!local || !local->_input_data ||
+        local->_input_data->mandatory_gpu_reservation_bytes() == 0) {
+      return true;
+    }
+    if (local->reservation()) { return true; }
+    auto info     = task.get_estimated_reservation_size_info(_memory_space);
+    auto floor    = std::max(info.mandatory_gpu_bytes, info.retry_reservation_floor);
+    auto capacity = _memory_space->get_max_memory();
+    if (floor > capacity) {
+      throw embedding::failure(
+        SIRIUS_RESOURCE_EXHAUSTED,
+        "TAE converter reservation exceeds GPU capacity before payload read");
+    }
+    auto desired     = std::min(info.reservation_size, capacity);
+    auto reservation = _memory_space->make_reservation_or_null(desired);
+    if (!reservation && desired > floor) {
+      reservation = _memory_space->make_reservation_or_null(floor);
+    }
+    if (reservation) {
+      local->set_reservation(std::move(reservation), info);
+      return true;
+    }
+    // One asynchronous reclaim request per device, never one per blocked scan.
+    // Its callback captures no task/query state and cannot prolong plan lifetime.
+    if (_downgrade_executor &&
+        (!_admission_downgrade.valid() ||
+         _admission_downgrade.wait_for(std::chrono::seconds(0)) == std::future_status::ready)) {
+      if (_admission_downgrade.valid()) { _admission_downgrade.get(); }
+      _admission_downgrade = _downgrade_executor->request_free_memory(floor);
+    }
+    return false;
+  } catch (...) {
+    if (handler) { handler->report_error(std::current_exception()); }
+    return true;
+  }
 }
 
 void gpu_pipeline_executor::manager_loop()
@@ -239,13 +283,25 @@ void gpu_pipeline_executor::process_task(
       _memory_space->get_available_memory(),
       _memory_space->get_total_reserved_memory(),
       _memory_space->get_max_memory());
+    auto* admitted_local = dynamic_cast<gpu_pipeline_task_local_state*>(gpu_task->local_state());
+    auto reservation     = admitted_local ? admitted_local->release_reservation() : nullptr;
+    exec::query_lifecycle_registry::memory_wait_guard memory_wait_activity;
+    if (reservation_info.mandatory_gpu_bytes) {
+      if (!reservation || reservation->size() < reservation_info.mandatory_gpu_bytes) {
+        if (auto handler = gpu_task->get_completion_handler()) {
+          handler->report_error("TAE task dispatched without its complete converter reservation");
+        }
+        return;
+      }
+      // Full converter admission is mandatory. Downstream estimates remain advisory.
+      bytes_needs = reservation->size();
+    } else {
     // Try without blocking first, purely so the blocking case can be reported.
     // make_reservation() parks until the memory frees up, and a listener told
     // only once it returns learns nothing it can act on -- by then the stall it
     // would have exploited is over.  A reservation that succeeds outright is the
     // common case and raises nothing.
-    auto reservation = _memory_space->make_reservation_or_null(bytes_needs);
-    exec::query_lifecycle_registry::memory_wait_guard memory_wait_activity;
+    reservation = _memory_space->make_reservation_or_null(bytes_needs);
     if (!reservation || reservation->size() < bytes_needs) {
       memory_wait_activity =
         _query_lifecycle.begin_memory_wait(pipe ? pipe->get_query_id() : make_query_id(0));
@@ -264,6 +320,7 @@ void gpu_pipeline_executor::process_task(
           bytes_needs);
       }
       reservation = _memory_space->make_reservation(bytes_needs);
+    }
     }
     if (!reservation) {
       SIRIUS_LOG_ERROR("GPU Pipeline Executor: Failed to acquire memory reservation for task {}",
@@ -535,7 +592,10 @@ void gpu_pipeline_executor::process_task(
               std::move(intermediate_data), ex.get_resume_operator_index());
             new_local_state->retry_count      = next_retry_count;
             new_local_state->original_task_id = orig_task_id;
-            if (cur_local) { new_local_state->inherit_retry_reservation_floor(*cur_local); }
+            if (cur_local) {
+              new_local_state->inherit_retry_reservation_floor(*cur_local);
+              new_local_state->execution_lease = cur_local->execution_lease;
+            }
 
             // Preserve the per-task device pin across reschedule. Dropping it lets
             // an OOM'd partition task scatter to the wrong GPU and touch a cuco

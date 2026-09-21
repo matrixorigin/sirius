@@ -103,6 +103,25 @@ class buffer_budget {
   ~buffer_budget() { close(); }
 
   // A failed acquire leaves out unchanged; no oversize/deadlock-escape grant.
+  // Nonblocking native-worker admission. TIMEOUT means temporary capacity
+  // pressure; RESOURCE_EXHAUSTED can never fit. Callers subscribe to the query
+  // waker before checking capacity so a concurrent release cannot be lost.
+  sirius_status try_acquire(std::size_t bytes, lease& out)
+  {
+    if (out || bytes == 0) return SIRIUS_INVALID_ARGUMENT;
+    auto owner = state_;
+    if (bytes > owner->capacity) return SIRIUS_RESOURCE_EXHAUSTED;
+    std::lock_guard lock(owner->mutex);
+    if (owner->closed) return SIRIUS_CANCELLED;
+    if (owner->leases == owner->max_leases || bytes > owner->capacity - owner->used)
+      return SIRIUS_TIMEOUT;
+    owner->used += bytes;
+    ++owner->leases;
+    if (owner->used > owner->peak) owner->peak = owner->used;
+    out = lease(owner, bytes);
+    return SIRIUS_OK;
+  }
+
   sirius_status acquire(std::size_t bytes,
                         std::stop_token stop,
                         clock::time_point deadline,

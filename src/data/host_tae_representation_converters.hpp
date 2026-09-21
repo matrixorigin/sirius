@@ -18,6 +18,7 @@
 
 // cucascade
 #include <cucascade/data/representation_converter.hpp>
+#include <data/host_tae_representation.hpp>
 
 namespace sirius {
 
@@ -25,5 +26,10 @@ namespace sirius {
  * @brief Register converters for host_tae_representation → gpu_table_representation.
  */
 void register_tae_converters(cucascade::representation_converter_registry& registry);
+
+// Checked conservative peak for descriptor-only embedded TAE tasks. Includes
+// compressed mirror, decompression/scratch, decode output and filter copies.
+std::size_t tae_decode_reservation_floor(
+  std::vector<host_tae_representation::column_chunk_info> const& chunks);
 
 }  // namespace sirius

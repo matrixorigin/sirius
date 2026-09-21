@@ -109,6 +109,16 @@ class interruptible_mpmc {
     return nullptr;
   }
 
+  /// Bounded wait for schedulers that must also observe external memory retirement.
+  pointer_type pop_for(std::int64_t microseconds)
+  {
+    pointer_type item;
+    if (_is_active.load(std::memory_order_relaxed)) {
+      queue.wait_dequeue_timed(item, microseconds);
+    }
+    return item;
+  }
+
   /**
    * \brief Attempts to pop without blocking.
    * \return Returns nullptr if the queue is empty.
