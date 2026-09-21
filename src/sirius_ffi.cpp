@@ -37,7 +37,9 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
+#include "embedding/native_gpu.hpp"
 #include "embedding/plan_bindings.hpp"
+#include "embedding/result_gpu.hpp"
 #include "embedding/tae_demand.hpp"
 #include "exec/stream_bind_catalog.hpp"   // sirius::exec::stream_bind_catalog
 #include "exec/stream_plan_bindings.hpp"  // sirius::exec::register_stream_source_function
@@ -54,6 +56,7 @@
 #include <chrono>
 #include <cstdlib>
 #include "sirius_interface.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "substrait/plan.pb.h"
 #include "tae_types.hpp"
 
@@ -264,18 +267,32 @@ std::size_t Context::embedded_tae_host_staging_bytes() const noexcept
 {
   return impl_->embedded_tae_host_staging;
 }
+bool Context::embedded_runtime_available() const noexcept
+{
+  return impl_->context->get_runtime_health() == duckdb::SiriusContext::runtime_health::OK;
+}
 
 struct EmbeddedPrepared::Impl {
   Context::Impl* context{};
   duckdb::shared_ptr<sirius::sirius_prepared_statement_data> plan;
   std::vector<std::string> views;
   std::shared_ptr<embedding::tae_demand_controller> tae_demand;
+  std::unique_ptr<duckdb::SiriusContext::StandaloneQueryScope> scope;
+  std::unique_ptr<sirius::sirius_interface> interface;
+  std::unique_ptr<sirius::sirius_engine> engine;
+  std::shared_ptr<embedding::result_publisher> publisher;
   bool cleaned{false};
 
   void finish()
   {
     if (cleaned) return;
     if (tae_demand) tae_demand->close();
+    if (publisher) publisher->stop();
+    if (scope) scope->finish();
+    publisher.reset();
+    engine.reset();
+    interface.reset();
+    scope.reset();
     plan.reset();
     auto& conn = *context->conn;
     try {
@@ -302,18 +319,38 @@ struct EmbeddedPrepared::Impl {
     }
   }
 
-  ~Impl()
-  {
-    try {
-      finish();
-    } catch (...) {
-      context->embedded_catalog->clear();
-    }
-  }
+  ~Impl() = default;
 };
 EmbeddedPrepared::EmbeddedPrepared(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
-EmbeddedPrepared::~EmbeddedPrepared() = default;
+EmbeddedPrepared::~EmbeddedPrepared()
+{
+  if (!impl_) return;
+  try {
+    impl_->finish();
+  } catch (...) {
+    impl_->context->context->mark_runtime_unavailable();
+    // Preserve the complete ownership graph when the noexcept backstop cannot
+    // prove cleanup; destroying individual members would undo quarantine.
+    (void)impl_.release();
+  }
+}
 void EmbeddedPrepared::finish() { impl_->finish(); }
+void EmbeddedPrepared::run(std::stop_token stop, std::chrono::steady_clock::time_point deadline)
+{
+  try {
+    impl_->engine->execute(stop, deadline);
+    impl_->publisher->finish();
+  } catch (...) {
+    auto original = std::current_exception();
+    try {
+      impl_->publisher->stop();  // Fatal publisher quiescence overrides an ordinary engine error.
+    } catch (...) {
+      impl_->context->context->mark_runtime_unavailable();
+      throw;
+    }
+    std::rethrow_exception(original);
+  }
+}
 
 namespace {
 std::atomic<uint64_t> embedded_generation{1};
@@ -368,6 +405,8 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
                                                             embedding::query_state const& query,
                                                             embedding::input_registry& inputs)
 {
+  if (!embedded_runtime_available())
+    throw embedding::failure(SIRIUS_GPU_UNAVAILABLE, "native runtime is unavailable");
   impl_->embedded_catalog->clear();
   auto const generation = embedded_generation.fetch_add(1, std::memory_order_relaxed);
   auto const has_tae = std::any_of(query.bindings.begin(), query.bindings.end(), [](auto const& b) {
@@ -383,6 +422,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
             : nullptr;
   impl_->conn->BeginTransaction();
   std::vector<std::string> views;
+  std::unique_ptr<EmbeddedPrepared::Impl> owner;
   try {
     for (auto const& read : query.bindings) {
       embedding::embedded_binding binding;
@@ -444,7 +484,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
     }
     auto physical = sirius::planner::sirius_physical_plan_generator(*impl_->conn->context)
                       .create_plan(std::move(lowered.plan));
-    auto owner        = std::make_unique<EmbeddedPrepared::Impl>();
+    owner             = std::make_unique<EmbeddedPrepared::Impl>();
     owner->context    = impl_.get();
     owner->tae_demand = std::move(tae_demand);
     owner->cleaned    = true;  // The surrounding transaction still owns the new views.
@@ -453,14 +493,66 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
     owner->views = std::move(views);
     impl_->conn->Commit();
     owner->cleaned = false;
+    auto hosts     = impl_->context->get_memory_manager().get_memory_spaces_for_tier(
+      cucascade::memory::Tier::HOST);
+    if (hosts.empty()) throw embedding::failure(SIRIUS_RESOURCE_EXHAUSTED, "no native host pool");
+    auto& host = *const_cast<cucascade::memory::memory_space*>(hosts.front());
+    query.results->activate(embedding::make_native_input_pool(host, embedding::result_window));
+    owner->scope = std::make_unique<duckdb::SiriusContext::StandaloneQueryScope>(
+      *impl_->context, *impl_->conn->context, "native_embedded");
+    owner->interface = std::make_unique<sirius::sirius_interface>(
+      *impl_->conn->context, std::optional<std::string>("native_embedded"));
+    owner->engine = std::make_unique<sirius::sirius_engine>(
+      *impl_->conn->context, *owner->interface, owner->scope->query_id());
+    owner->publisher = std::make_shared<embedding::result_publisher>(
+      query.results,
+      query.contract->outputs,
+      std::max<std::size_t>(2, 2 * impl_->embedded_gpu_streams),
+      query.stop.get_token(),
+      query.deadline,
+      [engine = owner->engine.get()](std::exception_ptr error) {
+        engine->report_execution_error(error);
+      });
+    auto subtree = std::move(owner->plan->sirius_physical_plan);
+    auto sink    = duckdb::make_uniq<embedding::native_result_sink>(
+      subtree->types, subtree->estimated_cardinality, owner->publisher);
+    sink->children.push_back(std::move(subtree));
+    owner->engine->initialize(std::move(sink));
+    // All progress reservations must fit before external producers may allocate.
+    embedding::activate_native_inputs(inputs, host);
     return std::unique_ptr<EmbeddedPrepared>(new EmbeddedPrepared(std::move(owner)));
   } catch (...) {
+    auto original = std::current_exception();
+    try {
+      std::rethrow_exception(original);
+    } catch (pipeline::gpu_stream_quiescence_error const&) {
+      impl_->context->mark_runtime_unavailable();
+    } catch (duckdb::SiriusBeginWindowFailureException const&) {
+      impl_->context->mark_runtime_unavailable();
+    } catch (duckdb::SiriusRuntimeUnavailableException const&) {
+      impl_->context->mark_runtime_unavailable();
+    } catch (...) {
+    }
+    if (!embedded_runtime_available()) {
+      (void)owner.release();
+      throw embedding::failure(SIRIUS_GPU_UNAVAILABLE, "native preparation poisoned the runtime");
+    }
+    if (owner) {
+      try {
+        owner->finish();
+      } catch (...) {
+        impl_->context->mark_runtime_unavailable();
+        (void)owner.release();
+        throw embedding::failure(SIRIUS_GPU_UNAVAILABLE,
+                                 "native preparation cleanup could not prove quiescence");
+      }
+    }
     try {
       impl_->conn->Rollback();
     } catch (...) {
     }
     impl_->embedded_catalog->clear();
-    throw;
+    std::rethrow_exception(original);
   }
 }
 
@@ -470,6 +562,12 @@ Context::Context(const std::string& config_path, uint32_t gpu_pipeline_threads)
   impl_->embedded_gpu_streams = gpu_pipeline_threads;
   sirius::sirius_config config;
   config.load_from_file(config_path);
+  auto const& spaces = config.get_memory_space_configs();
+  if (std::count_if(spaces.begin(), spaces.end(), [](auto const& space) {
+        return std::holds_alternative<cucascade::memory::gpu_memory_space_config>(space);
+      }) != 1)
+    throw embedding::failure(SIRIUS_UNSUPPORTED,
+                             "native embedding requires exactly one configured GPU");
   config.set_gpu_pipeline_executor_threads(gpu_pipeline_threads);
   impl_->bring_up(config);
 }

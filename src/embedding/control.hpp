@@ -22,6 +22,7 @@
 
 namespace sirius::embedding {
 class native_input;
+class native_result;
 struct input_registry;
 struct query_state;
 struct owned_column {
@@ -72,6 +73,7 @@ class query_driver {
 class engine_backend {
  public:
   virtual ~engine_backend() = default;
+  virtual bool available() const noexcept { return true; }
   virtual std::size_t metadata_capacity_bytes() const noexcept { return 256u << 20; }
   virtual std::unique_ptr<query_driver> prepare_inputs(std::string_view plan,
                                                        input_registry& inputs,
@@ -106,6 +108,8 @@ enum class query_phase {
 };
 struct query_state {
   std::shared_ptr<input_registry> inputs;
+  std::shared_ptr<native_result> results;
+  std::vector<sirius_column> result_schema;
   std::string plan;
   clock::time_point deadline;
   std::stop_source stop;
@@ -148,6 +152,8 @@ class engine_control {
                                                uint32_t count);
   void bind_query(std::shared_ptr<query_state> const&, const sirius_query_contract&);
   void register_read(std::shared_ptr<query_state> const&, const sirius_read_binding&);
+  sirius_result_schema result_schema(std::shared_ptr<query_state> const&);
+  void require_result_active(std::shared_ptr<query_state> const&);
 
  private:
   void worker() noexcept;

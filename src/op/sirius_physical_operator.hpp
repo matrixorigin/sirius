@@ -18,6 +18,7 @@
 
 #include "config.hpp"
 #include "duckdb/common/common.hpp"
+#include "embedding/terminal_admission.hpp"
 #include "helper/logical_type.hpp"
 #include "helper/types.hpp"
 #include "late_mat/defer_directive.hpp"
@@ -672,6 +673,17 @@ class sirius_physical_operator {
  public:
   // Sink interface
   virtual void sink(const operator_data& input_data, ::cuda::stream_ref stream);
+
+  virtual std::shared_ptr<embedding::terminal_admission> terminal_admission_control() const
+  {
+    return nullptr;
+  }
+  virtual void sink_admitted(const operator_data& input_data,
+                             rmm::cuda_stream_view stream,
+                             std::shared_ptr<embedding::terminal_ticket>)
+  {
+    sink(input_data, stream);
+  }
 
   //! An operator is a pipeline sink iff its tree parent is a PARTITION, RIGHT_DELIM_JOIN, or
   //! DENSE_COUNT_JOIN — computed from `_parent_op` so it always reflects the final tree. Those

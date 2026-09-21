@@ -71,6 +71,7 @@ std::string exception_message(const std::exception_ptr& error)
 
 struct quarantined_task_owners {
   std::shared_ptr<void> execution_lease;
+  std::shared_ptr<embedding::terminal_ticket> terminal_ticket;
   std::unique_ptr<op::operator_data> input;
   std::unique_ptr<op::operator_data> pending_output;
   std::unique_ptr<op::operator_data> materialized_input;
@@ -83,7 +84,8 @@ void quarantine_task_owners(std::unique_ptr<op::operator_data> input,
                             std::unique_ptr<op::operator_data> materialized_input,
                             std::unique_ptr<op::operator_data> output,
                             std::unique_ptr<op::operator_data> rescheduled_input,
-                            std::shared_ptr<void> execution_lease) noexcept
+                            std::shared_ptr<void> execution_lease,
+                            std::shared_ptr<embedding::terminal_ticket> terminal_ticket) noexcept
 {
   // Synchronization failure is process-fatal. Retain task owners until
   // fail-stop exit lets OS/CUDA teardown become the terminal cleanup owner.
@@ -95,6 +97,7 @@ void quarantine_task_owners(std::unique_ptr<op::operator_data> input,
   slot->output             = std::move(output);
   slot->rescheduled_input  = std::move(rescheduled_input);
   slot->execution_lease    = std::move(execution_lease);
+  slot->terminal_ticket    = std::move(terminal_ticket);
 
   try {
     static std::mutex mutex;
@@ -667,7 +670,10 @@ void gpu_pipeline_task::publish_output(op::operator_data& output_data,
     const bool observe_publication =
       completion && completion->injections && completion->injections->hold_footer_index &&
       (materialized ? *materialized : output_data).get_estimated_size_in_bytes() > 0;
-    sink_operators.get()->sink(materialized ? *materialized : output_data, stream);
+    sink_operators.get()->sink_admitted(
+      materialized ? *materialized : output_data,
+      stream,
+      _local_state->cast<gpu_pipeline_task_local_state>().terminal_ticket);
     if (observe_publication) completion->record_publication_for_testing();
     auto const sink_end = std::chrono::high_resolution_clock::now();
     auto const sink_duration =
@@ -973,7 +979,8 @@ void gpu_pipeline_task::quarantine_failed_task_owners(
     std::move(materialized_input),
     std::move(output),
     std::move(rescheduled_input),
-    std::move(_local_state->cast<gpu_pipeline_task_local_state>().execution_lease));
+    std::move(_local_state->cast<gpu_pipeline_task_local_state>().execution_lease),
+    std::move(_local_state->cast<gpu_pipeline_task_local_state>().terminal_ticket));
 }
 
 std::size_t gpu_pipeline_task::get_input_size() const

@@ -3,6 +3,7 @@
  */
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
+#include "embedding/result.hpp"
 #include "sirius_c.h"
 
 #include <chrono>
@@ -29,6 +30,7 @@ struct sirius_input_handle {
 struct sirius_batch_handle {
   std::shared_ptr<query_state> query;
   std::shared_ptr<sirius::embedding::input_batch> batch;
+  std::shared_ptr<sirius::embedding::result_batch> result;
   ~sirius_batch_handle()
   {
     if (batch) {
@@ -65,7 +67,11 @@ void require_options(T const* options)
 }  // namespace
 
 extern "C" uint32_t sirius_abi_version(void) { return SIRIUS_ABI_VERSION; }
-extern "C" uint64_t sirius_capabilities(void) { return SIRIUS_CAP_ENGINE_CONTROL; }
+extern "C" uint64_t sirius_capabilities(void)
+{
+  return SIRIUS_CAP_ENGINE_CONTROL | SIRIUS_CAP_MO_INPUT | SIRIUS_CAP_TAE_INPUT |
+         SIRIUS_CAP_NATIVE_RESULTS;
+}
 
 extern "C" sirius_status sirius_engine_create(const sirius_engine_options* options,
                                               sirius_engine_handle** out,
@@ -276,7 +282,7 @@ extern "C" sirius_status sirius_input_publish(sirius_input_handle* input,
                                               sirius_error* error)
 {
   return boundary(error, [&]() -> sirius_error {
-    require(input && batch && *batch && (columns || !count) &&
+    require(input && batch && *batch && (*batch)->batch && (columns || !count) &&
               count <= sirius::embedding::input_columns_limit,
             "invalid native batch publication");
     input->input->publish((*batch)->batch, rows, {columns, count});
@@ -325,6 +331,7 @@ extern "C" sirius_status sirius_input_close(sirius_input_handle** input, sirius_
     // Closing a producer is not an implicit successful EOS.
     if (!(*input)->input->finished() && !(*input)->input->outcome().code)
       (*input)->control->cancel((*input)->query);
+    (*input)->input.reset();
     --(*input)->query->inputs->handles;
     delete *input;
     *input = nullptr;
@@ -337,6 +344,76 @@ extern "C" sirius_status sirius_batch_release(sirius_batch_handle** batch, siriu
     require(batch, "missing native batch handle address");
     delete *batch;
     *batch = nullptr;
+    return {};
+  });
+}
+
+extern "C" sirius_status sirius_query_get_schema(sirius_query_handle* query,
+                                                 sirius_result_schema* out,
+                                                 sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query, "missing query");
+    require_options(out);
+    *out = query->control->result_schema(query->state);
+    return {};
+  });
+}
+extern "C" sirius_status sirius_query_next_result(sirius_query_handle* query,
+                                                  uint32_t wait_ms,
+                                                  sirius_batch_handle** out,
+                                                  sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query && out && !*out, "invalid result output");
+    query->control->require_result_active(query->state);
+    auto handle    = std::make_unique<sirius_batch_handle>();
+    handle->query  = query->state;
+    handle->result = query->state->results->next(sirius::embedding::clock::now() +
+                                                 std::chrono::milliseconds(wait_ms));
+    *out           = handle.release();
+    return {};
+  });
+}
+extern "C" sirius_status sirius_result_describe(sirius_batch_handle* batch,
+                                                sirius_result_batch_info* out,
+                                                sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(batch && batch->result, "batch is not a native result");
+    require_options(out);
+    auto const& result = *batch->result;
+    *out               = {sizeof(*out),
+                          SIRIUS_ABI_VERSION,
+                          result.rows,
+                          result.column_count,
+                          result.payload_bytes,
+                          result.columns.get()};
+    return {};
+  });
+}
+extern "C" sirius_status sirius_result_read(
+  sirius_batch_handle* batch, uint64_t offset, void* data, uint64_t bytes, sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(batch && batch->result && (data || !bytes), "invalid native result read");
+    auto const& result = *batch->result;
+    require(offset <= result.payload_bytes && bytes <= result.payload_bytes - offset,
+            "native result read is out of bounds");
+    if (bytes)
+      result.storage->read(offset,
+                           {static_cast<std::byte*>(data), static_cast<std::size_t>(bytes)});
+    return {};
+  });
+}
+extern "C" sirius_status sirius_query_get_result_stats(sirius_query_handle* query,
+                                                       sirius_result_stats* out,
+                                                       sirius_error* error)
+{
+  return boundary(error, [&]() -> sirius_error {
+    require(query, "missing query");
+    require_options(out);
+    *out = query->state->results->inspect();
     return {};
   });
 }

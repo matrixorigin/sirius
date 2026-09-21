@@ -133,13 +133,37 @@ int main(int argc, char** argv)
       CHECK(batch == NULL);
     }
     CHECK(sirius_query_prepare(query, 10000, &error) == SIRIUS_OK);
-    CHECK(sirius_input_acquire(input, 8, 0, &batch, &error) == SIRIUS_INVALID_STATE);
-    CHECK(batch == NULL);
-    CHECK(sirius_query_start(query, &error) == SIRIUS_UNSUPPORTED);
+    {
+      int64_t value = 42, observed = 0;
+      sirius_input_vector vector    = {0};
+      sirius_result_schema schema   = {sizeof(schema), SIRIUS_ABI_VERSION, 0, 0, NULL};
+      sirius_result_batch_info info = {sizeof(info), SIRIUS_ABI_VERSION, 0, 0, 0, NULL};
+      vector.data_bytes             = sizeof(value);
+      CHECK(sirius_query_get_schema(query, &schema, &error) == SIRIUS_OK);
+      CHECK(schema.column_count == 1 && schema.columns[0].oid == 23);
+      CHECK(sirius_input_acquire(input, sizeof(value), 0, &batch, &error) == SIRIUS_OK);
+      CHECK(sirius_result_describe(batch, &info, &error) == SIRIUS_INVALID_ARGUMENT);
+      CHECK(sirius_input_write(batch, 0, &value, sizeof(value), &error) == SIRIUS_OK);
+      CHECK(sirius_input_publish(input, &batch, 1, &vector, 1, &error) == SIRIUS_OK);
+      CHECK(batch == NULL);
+      CHECK(sirius_input_finish(input, &error) == SIRIUS_OK);
+      CHECK(sirius_query_start(query, &error) == SIRIUS_OK);
+      CHECK(sirius_query_next_result(query, 10000, &batch, &error) == SIRIUS_OK);
+      CHECK(sirius_result_describe(batch, &info, &error) == SIRIUS_OK);
+      CHECK(info.rows == 1 && info.column_count == 1);
+      CHECK(sirius_result_read(
+              batch, info.columns[0].data_offset, &observed, sizeof(observed), &error) ==
+            SIRIUS_OK);
+      CHECK(observed == value);
+      CHECK(sirius_input_write(batch, 0, &value, sizeof(value), &error) == SIRIUS_INVALID_ARGUMENT);
+      CHECK(sirius_query_wait(query, 10000, &error) == SIRIUS_OK);
+    }
     CHECK(sirius_query_cancel(query, &error) == SIRIUS_OK);
-    CHECK(sirius_query_wait(query, 10000, &error) == SIRIUS_CANCELLED);
+    CHECK(sirius_query_wait(query, 10000, &error) == SIRIUS_OK);
     CHECK(sirius_query_close(&query, 10000, &error) == SIRIUS_BUSY && query != NULL);
     CHECK(sirius_input_close(&input, &error) == SIRIUS_OK && input == NULL);
+    CHECK(sirius_query_close(&query, 10000, &error) == SIRIUS_BUSY && query != NULL);
+    CHECK(sirius_batch_release(&batch, &error) == SIRIUS_OK && batch == NULL);
     CHECK(sirius_query_close(&query, 10000, &error) == SIRIUS_OK && query == NULL);
     CHECK(sirius_query_create(engine, &qopts, "x", 1, &query, &error) == SIRIUS_OK);
     CHECK(sirius_query_create(engine, &qopts, "x", 1, &query, &error) == SIRIUS_INVALID_ARGUMENT);

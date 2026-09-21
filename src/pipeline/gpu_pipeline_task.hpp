@@ -73,6 +73,7 @@ class gpu_pipeline_task_local_state : public sirius_pipeline_task_local_state {
   }
 
   std::unique_ptr<op::operator_data> _input_data;  ///< Input data batches for the pipeline
+  std::shared_ptr<embedding::terminal_ticket> terminal_ticket;
   std::shared_ptr<void> execution_lease;
   size_t _start_operator_index = 0;  ///< Operator index to resume from (0 = start of pipeline)
 

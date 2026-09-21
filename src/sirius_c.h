@@ -92,6 +92,26 @@ typedef struct sirius_input_stats {
   uint64_t blocked_acquires, source_units;
 } sirius_input_stats;
 
+/* Borrowed schema metadata remains valid until the query is successfully closed. */
+typedef struct sirius_result_schema {
+  uint32_t struct_size, abi_version, column_count, reserved;
+  const sirius_column* columns;
+} sirius_result_schema;
+
+/* Column descriptors remain valid until batch_release. Payload is native-owned
+ * and may be segmented; use result_read for synchronous bulk copies. */
+typedef struct sirius_result_batch_info {
+  uint32_t struct_size, abi_version, rows, column_count;
+  uint64_t payload_bytes;
+  const sirius_input_vector* columns;
+} sirius_result_batch_info;
+
+typedef struct sirius_result_stats {
+  uint32_t struct_size, abi_version;
+  uint64_t retained_bytes, peak_bytes, leases, queued_batches;
+  uint64_t borrowed_batches, filling_batches, parked_publications, blocked_publications;
+} sirius_result_stats;
+
 typedef uint32_t sirius_status;
 enum {
   SIRIUS_OK                 = 0,
@@ -197,6 +217,30 @@ sirius_status sirius_query_wait(sirius_query_handle* query, uint32_t wait_ms, si
 sirius_status sirius_query_close(sirius_query_handle** query,
                                  uint32_t wait_ms,
                                  sirius_error* error);
+
+/* Prepare exposes the schema; start enables result retrieval. There is one
+ * pull consumer per query, independent of concurrent cancellation. A call
+ * timeout does not cancel execution. EOF follows successful quiescence and is
+ * distinct from an empty batch. Returned leases survive cancellation; close
+ * remains BUSY until they are released. */
+sirius_status sirius_query_get_schema(sirius_query_handle* query,
+                                      sirius_result_schema* out,
+                                      sirius_error* error);
+sirius_status sirius_query_next_result(sirius_query_handle* query,
+                                       uint32_t wait_ms,
+                                       sirius_batch_handle** out,
+                                       sirius_error* error);
+sirius_status sirius_result_describe(sirius_batch_handle* batch,
+                                     sirius_result_batch_info* out,
+                                     sirius_error* error);
+sirius_status sirius_result_read(sirius_batch_handle* batch,
+                                 uint64_t offset,
+                                 void* destination,
+                                 uint64_t bytes,
+                                 sirius_error* error);
+sirius_status sirius_query_get_result_stats(sirius_query_handle* query,
+                                            sirius_result_stats* out,
+                                            sirius_error* error);
 
 /* Register while CREATED; acquire only after successful startable preparation. Each read
  * has a strict 64 MiB window, including filling, queued and GPU/retry owners.

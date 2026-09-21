@@ -1,0 +1,10 @@
+sirius:
+  space:
+    gpu:
+      - device_id: 0
+        memory_capacity: 268435456
+      - device_id: 1
+        memory_capacity: 268435456
+    host:
+      - numa_id: -1
+        memory_capacity: 536870912

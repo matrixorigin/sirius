@@ -312,8 +312,8 @@ void gpu_pipeline_executor::process_task(
           _memory_space != nullptr ? _memory_space->get_device_id() : -1,
           bytes_needs);
       }
-    }
       reservation = _memory_space->make_reservation(bytes_needs);
+    }
     }
     if (!reservation) {
       SIRIUS_LOG_ERROR("GPU Pipeline Executor: Failed to acquire memory reservation for task {}",
@@ -584,6 +584,7 @@ void gpu_pipeline_executor::process_task(
           new_local_state->original_task_id = orig_task_id;
           if (cur_local) {
             new_local_state->inherit_retry_reservation_floor(*cur_local);
+            new_local_state->terminal_ticket = cur_local->terminal_ticket;
             new_local_state->execution_lease = cur_local->execution_lease;
           }
 
