@@ -126,7 +126,15 @@ int main(int argc, char** argv)
                                      0,
                                      NULL,
                                      0};
+      char query_identity[]       = {'\0', 'q', '\0', 'i', '\0'};
+      contract.query_id           = query_identity;
+      contract.query_id_bytes     = 0;
+      CHECK(sirius_query_bind(query, &contract, &error) == SIRIUS_INVALID_ARGUMENT);
+      contract.query_id_bytes = 4097;
+      CHECK(sirius_query_bind(query, &contract, &error) == SIRIUS_INVALID_ARGUMENT);
+      contract.query_id_bytes = sizeof(query_identity);
       CHECK(sirius_query_bind(query, &contract, &error) == SIRIUS_OK);
+      memset(query_identity, 'X', sizeof(query_identity));
       CHECK(sirius_read_register(query, &binding, &error) == SIRIUS_OK);
       CHECK(sirius_input_register(query, 1, &column, 1, &input, &error) == SIRIUS_OK);
       CHECK(sirius_input_acquire(input, 8, 0, &batch, &error) == SIRIUS_INVALID_STATE);

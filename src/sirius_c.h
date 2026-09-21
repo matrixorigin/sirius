@@ -41,6 +41,8 @@ typedef struct sirius_query_contract {
   uint32_t struct_size, abi_version;
   uint32_t account_id;
   uint32_t reserved;
+  /* Opaque identity copied by bind. Exactly 1..4096 bytes; embedded NUL bytes
+   * are allowed and no terminator is required. */
   const char* query_id;
   uint32_t query_id_bytes;
   uint8_t snapshot_ts[12];
