@@ -103,6 +103,28 @@ libcuvs = "==26.08.01"
 CUDAARCHS = "75-real;80-real;86-real;89-real;90a-real"
 VCPKG_CUDA_VERSION = "12"
 
+# Optional MatrixOne embedding profile. The ordinary Sirius profiles retain
+# their existing toolkit selection; MO and Sirius share this locked provider.
+[feature.mo]
+platforms = ["linux-64-cuda13"]
+
+[feature.mo.dependencies]
+cuda-version = "13.3.*"
+libcudf = "==26.08.01"
+libcuvs = "==26.08.01"
+librmm = "26.08.*"
+gcc_linux-64 = "14.*"
+gxx_linux-64 = "14.*"
+patchelf = "*"
+
+[feature.mo.activation.env]
+CUDAARCHS = "75-real;80-real;86-real;89-real;90a-real;100f-real;120a-real;120"
+VCPKG_CUDA_VERSION = "13"
+
+[feature.mo.tasks]
+mo-configure-embedding-sdk = "cmake --preset release -S duckdb -B build/mo -DCMAKE_CUDA_COMPILER_LAUNCHER= -DEXPORT_DYNAMIC_SYMBOLS=OFF -DSIRIUS_BUILD_S3_TESTS=OFF"
+mo-build-embedding-sdk = { cmd = "cmake --build build/mo --target sirius_c_smoke", depends-on = ["mo-configure-embedding-sdk"] }
+
 [feature.vcpkg.dependencies]
 # Enable S3 use for vcpkg cache
 awscli = "*"
@@ -142,6 +164,7 @@ nightly-run = "scripts/generate_nightly_env.sh && env -u PIXI_ENVIRONMENT_NAME p
 
 [environments]
 default = ["dev-libs", "cuda13"]
+mo = ["dev-libs", "mo"]
 cuda12 = ["dev-libs", "cuda12"]
 duckdb-python = ["duckdb-python"]
 vcpkg = ["vcpkg", "cuda13"]
