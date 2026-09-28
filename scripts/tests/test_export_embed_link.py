@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +18,49 @@ spec.loader.exec_module(sdk)
 
 
 class ExportTest(unittest.TestCase):
+    def test_export_retires_stale_gpu_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "embedding-sdk"
+            output.mkdir()
+            stale = output / "toolchain.json"
+            stale.write_text("obsolete GPU manifest")
+            header = root / "sirius_c.h"
+            header.write_text("#define SIRIUS_ABI_VERSION 1u\n")
+            consumer = root / "consumer"
+            consumer.write_bytes(b"consumer")
+            argv = [
+                "export_embed_link.py",
+                "--ninja",
+                "ninja",
+                "--build",
+                str(root),
+                "--consumer",
+                str(consumer),
+                "--header",
+                str(header),
+                "--output",
+                str(output),
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                sdk.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ), patch.object(
+                sdk, "link_arguments", return_value=("/usr/bin/c++", [])
+            ), patch.object(
+                sdk, "c_compiler", return_value="/usr/bin/cc"
+            ), patch.object(
+                sdk, "source_provenance", return_value={"source_revision": "test"}
+            ), patch.object(
+                sdk, "artifact_hashes", return_value={}
+            ):
+                sdk.main()
+            self.assertFalse(stale.exists())
+            self.assertNotIn(
+                "gpu_toolchain_manifest", json.loads((output / "link.json").read_text())
+            )
+
     def test_c_compiler_is_verified_from_cache_and_actual_compile(self):
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
