@@ -242,6 +242,9 @@ def main():
         args.output / "sirius_c.h"
     )
     (args.output / "link.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Reusing a build tree must not leave the retired GPU-provider manifest
+    # beside a newly exported SDK that no longer records or validates it.
+    (args.output / "toolchain.json").unlink(missing_ok=True)
     # GCC/Clang response files accept quoted arguments with backslash escapes.
     response = "\n".join(
         '"' + flag.replace("\\", "\\\\").replace('"', '\\"') + '"' for flag in flags
