@@ -49,13 +49,14 @@ class checking_sink final : public sirius::op::sirius_physical_operator {
   }
   bool is_sink() const override { return true; }
   std::unique_ptr<sirius::op::operator_data> execute(sirius::op::operator_data const& data,
-                                                     rmm::cuda_stream_view) override
+                                                     ::cuda::stream_ref) override
   {
     return std::make_unique<sirius::op::pipelineable_operator_data>(
-      dynamic_cast<sirius::op::pipelineable_operator_data const&>(data).get_read_only_batches());
+      dynamic_cast<sirius::op::pipelineable_operator_data const&>(data).get_data_batches());
   }
-  void sink(sirius::op::operator_data const& data, rmm::cuda_stream_view stream) override
+  void sink(sirius::op::operator_data const& data, ::cuda::stream_ref native_stream) override
   {
+    rmm::cuda_stream_view stream{native_stream};
     for (auto const& batch : dynamic_cast<sirius::op::pipelineable_operator_data const&>(data)
                                .get_read_only_batches()) {
       auto table = sirius::get_cudf_table_view(batch);

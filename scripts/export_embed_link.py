@@ -24,7 +24,17 @@ def sha256(path):
 
 
 def source_provenance(header):
-    source = header.resolve().parents[2]
+    # The public C header may move as Sirius reorganizes its include tree.
+    # Resolve the owning Git checkout from the header itself: a Sirius
+    # submodule must record its own commit, never its containing superproject.
+    source = Path(
+        subprocess.run(
+            ["git", "-C", str(header.resolve().parent), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
 
     def git(*arguments):
         return subprocess.run(

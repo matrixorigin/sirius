@@ -4,7 +4,7 @@
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
-#include "sirius_ffi.hpp"
+#include "sirius/ffi.hpp"
 
 #include <algorithm>
 #include <atomic>
