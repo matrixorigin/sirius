@@ -24,11 +24,11 @@ class sirius_physical_gpu_mo_scan final : public sirius_physical_operator {
   std::optional<task_creation_hint> get_next_task_hint() override
   {
     if (exhausted.load(std::memory_order_acquire)) { return std::nullopt; }
-    // This source permits exactly one blocking next_batch() task. Reporting
+    // This source permits exactly one blocking source-batch task. Reporting
     // WAITING with itself as producer would make task selection recurse back
     // into this same operator while that task is active. Publication releases
     // the claim without self-scheduling; only downstream demand may reach this
-    // source again and admit the next task.
+    // source again and admit the next bounded batch.
     if (task_active.load(std::memory_order_acquire)) { return std::nullopt; }
     return task_creation_hint{TaskCreationHint::READY, this};
   }

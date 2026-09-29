@@ -160,9 +160,9 @@ struct BatchedFixedDesc {
 
 /// Block descriptor for batched null mask inversion.
 struct BatchedNullMaskDesc {
-  const uint8_t* src;            ///< Device pointer to MO null bitmap.
-  uint32_t n_rows;               ///< Number of rows in this block.
-  uint32_t bitmask_word_offset;  ///< Word offset in the output cuDF validity mask.
+  const uint8_t* src;           ///< MO bitmap including its 24-byte count/coverage/size header.
+  uint32_t n_rows;              ///< Number of rows in this block.
+  uint32_t bitmask_row_offset;  ///< Row offset in the output cuDF validity mask.
 };
 
 /**
@@ -190,7 +190,9 @@ void batched_decode_fixed_width(const BatchedFixedDesc* d_descs,
 /**
  * @brief Batched null mask inversion across multiple blocks.
  *
- * Replaces per-block invert_null_mask calls with a single 2D-grid kernel.
+ * Replaces per-block invert_null_mask calls with a single 2D-grid kernel. The
+ * descriptors may start at arbitrary row offsets; adjacent descriptors safely
+ * merge into a shared destination word.
  *
  * @param d_descs     Device array of BatchedNullMaskDesc
  * @param n_descs     Number of descriptors (blocks with nulls)

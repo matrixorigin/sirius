@@ -177,7 +177,7 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   rmm::cuda_device_id target_device_id(target_memory_space->get_device_id());
   rmm::cuda_set_device_raii target_device_raii(target_device_id);
 
-  // 1. Get contiguous host buffer
+  // 1. Get the host buffer (contiguous TAE data or pooled MO input blocks).
   auto const& linear_host = *host_src.get_host_data();
 
   // 2. Group chunks by column_idx (ordered by block index within each column)
@@ -213,18 +213,13 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   CUDF_CUDA_TRY(cudaEventCreate(&ev_end));
 #endif
 
-  // 4. Transfer entire host buffer to GPU in a single contiguous copy.
-  //    This replaces per-chunk H→D copies, reducing driver overhead and
-  //    enabling full PCIe bandwidth utilization.
+  // 4. Transfer used host bytes into one contiguous device mirror. TAE input
+  //    uses a single copy; pooled MO input copies its existing pinned blocks.
   rmm::device_buffer d_mirror(linear_host.size(), stream, mr_ref);
 #ifdef SIRIUS_PROFILE
   CUDF_CUDA_TRY(cudaEventRecord(ev_pre_h2d, stream.value()));
 #endif
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_mirror.data(),
-                                linear_host.data(),
-                                linear_host.size(),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(linear_host.copy_to_device(d_mirror.data(), stream));
 #ifdef SIRIUS_PROFILE
   auto const cvt_h2d = std::chrono::high_resolution_clock::now();
   CUDF_CUDA_TRY(cudaEventRecord(ev_h2d, stream.value()));
@@ -499,20 +494,35 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
         null_mask =
           cudf::create_null_mask(col_total_rows, cudf::mask_state::ALL_VALID, stream, mr_ref);
 
+        std::vector<cuda::tae::BatchedNullMaskDesc> h_null_descs;
         std::size_t bitmask_row_offset = 0;
         for (auto& block : blocks) {
           auto& chunk = chunks[block.chunk_index];
           if (chunk.null_cnt > 0) {
             auto* d_src_blk = chunk_device_ptrs[block.chunk_index];
             uint32_t nsp_bitmap_offset =
-              chunk.vector_header_size + block.actual_data_len + 4 + block.area_len + 4 + 24;
-            auto* d_validity = static_cast<uint32_t*>(null_mask.data());
-            cuda::tae::invert_null_mask(d_src_blk + nsp_bitmap_offset,
-                                        d_validity + (bitmask_row_offset / 32),
-                                        block.rows,
-                                        stream);
+              chunk.vector_header_size + block.actual_data_len + 4 + block.area_len + 4;
+            h_null_descs.push_back({d_src_blk + nsp_bitmap_offset,
+                                    block.rows,
+                                    static_cast<uint32_t>(bitmask_row_offset)});
           }
           bitmask_row_offset += block.rows;
+        }
+
+        if (!h_null_descs.empty()) {
+          rmm::device_buffer d_null_descs(
+            h_null_descs.size() * sizeof(cuda::tae::BatchedNullMaskDesc), stream, mr_ref);
+          CUDF_CUDA_TRY(
+            cudaMemcpyAsync(d_null_descs.data(),
+                            h_null_descs.data(),
+                            h_null_descs.size() * sizeof(cuda::tae::BatchedNullMaskDesc),
+                            cudaMemcpyHostToDevice,
+                            stream.value()));
+          cuda::tae::batched_invert_null_mask(
+            static_cast<cuda::tae::BatchedNullMaskDesc*>(d_null_descs.data()),
+            static_cast<uint32_t>(h_null_descs.size()),
+            static_cast<uint32_t*>(null_mask.data()),
+            stream);
         }
       }
 
@@ -591,10 +601,10 @@ std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
           }
           auto* d_src                = chunk_device_ptrs[cr.chunk_index];
           uint32_t data_len          = chunk.row_count * elem_size;
-          uint32_t nsp_bitmap_offset = chunk.vector_header_size + data_len + 4 + 0 + 4 + 24;
+          uint32_t nsp_bitmap_offset = chunk.vector_header_size + data_len + 4 + 0 + 4;
           h_null_descs.push_back({d_src + nsp_bitmap_offset,
                                   chunk.row_count,
-                                  static_cast<uint32_t>(bitmask_row_offset / 32)});
+                                  static_cast<uint32_t>(bitmask_row_offset)});
           bitmask_row_offset += chunk.row_count;
         }
 

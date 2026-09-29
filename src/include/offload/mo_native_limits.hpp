@@ -9,7 +9,8 @@
 
 namespace sirius::offload {
 
-inline constexpr std::size_t max_expanded_native_batch_bytes = 64U * 1024U * 1024U;
+inline constexpr std::size_t max_expanded_native_batch_bytes   = 64U * 1024U * 1024U;
+inline constexpr std::size_t max_native_frames_per_source_task = 128U;
 
 [[nodiscard]] inline constexpr std::size_t mo_native_scan_reservation_bytes() noexcept
 {

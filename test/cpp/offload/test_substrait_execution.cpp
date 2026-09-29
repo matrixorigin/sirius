@@ -265,7 +265,7 @@ void require_error(const std::string& plan,
 
 }  // namespace
 
-TEST_CASE("MO native scan reserves one maximally expanded frame", "[substrait_contract]")
+TEST_CASE("MO native scan reserves one bounded source batch", "[substrait_contract]")
 {
   REQUIRE(sirius::offload::mo_native_scan_reservation_bytes() ==
           sirius::offload::max_expanded_native_batch_bytes);

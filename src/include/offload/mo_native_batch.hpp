@@ -51,11 +51,18 @@ class mo_native_batch {
   [[nodiscard]] virtual const std::vector<mo_native_column_view>& columns() const noexcept = 0;
 };
 
+enum class mo_native_batch_source_status { BATCH, END_OF_STREAM, NOT_NEEDED };
+
+struct mo_native_batch_source_result {
+  mo_native_batch_source_status status = mo_native_batch_source_status::END_OF_STREAM;
+  std::shared_ptr<mo_native_batch> batch;
+};
+
 class mo_native_batch_source {
  public:
-  virtual ~mo_native_batch_source()                           = default;
-  virtual std::shared_ptr<mo_native_batch> next_batch()       = 0;
-  virtual void mark_consumed(std::uint64_t sequence) noexcept = 0;
+  virtual ~mo_native_batch_source()                  = default;
+  virtual mo_native_batch_source_result next_batch() = 0;
+  virtual bool mark_consumed(std::uint64_t sequence) = 0;
 };
 
 // DuckDB binds this marker to mo_stream_scan. Sirius recognizes the common

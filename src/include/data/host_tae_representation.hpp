@@ -22,6 +22,7 @@
 
 // cucascade
 #include <cucascade/data/common.hpp>
+#include <cucascade/memory/fixed_size_host_memory_resource.hpp>
 #include <cucascade/memory/memory_space.hpp>
 
 // rmm
@@ -31,7 +32,9 @@
 #include <cuda_runtime.h>
 
 // standard library
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -55,14 +58,16 @@ class host_tae_input_lease {
  *
  * Pinned memory enables truly asynchronous cudaMemcpyAsync transfers,
  * avoiding the internal staging copy that pageable memory requires.
- * Provides the same data()/size() interface as std::vector<uint8_t>.
+ * Contiguous allocations expose data()/size(); pooled allocations use bounded
+ * copy_from/copy_to_device operations across their constituent blocks.
  */
 struct pinned_host_buffer {
   static constexpr std::size_t PINNED_THRESHOLD = std::size_t(64) << 20;  // 64 MB
 
   pinned_host_buffer() = default;
 
-  explicit pinned_host_buffer(std::size_t n) : _size(n), _pinned(n >= PINNED_THRESHOLD)
+  explicit pinned_host_buffer(std::size_t n)
+    : _size(n), _capacity(n), _pinned(n >= PINNED_THRESHOLD)
   {
     if (n > 0) {
       if (_pinned) {
@@ -77,6 +82,19 @@ struct pinned_host_buffer {
     }
   }
 
+  // Borrow bounded blocks from the same pool used by the other scan sources.
+  // The allocation must be destroyed before its reservation and memory space.
+  pinned_host_buffer(std::size_t n,
+                     cucascade::memory::fixed_size_host_memory_resource& pool,
+                     std::unique_ptr<cucascade::memory::reservation> reservation)
+    : _size(n), _capacity(n), _pinned(true), _reservation(std::move(reservation))
+  {
+    if (!_reservation || _reservation->size() < n) {
+      throw std::invalid_argument("pooled host buffer requires its complete reservation");
+    }
+    _blocks = pool.allocate_multiple_blocks(n, _reservation.get());
+  }
+
   ~pinned_host_buffer()
   {
     if (_ptr) {
@@ -88,26 +106,38 @@ struct pinned_host_buffer {
   }
 
   pinned_host_buffer(pinned_host_buffer&& o) noexcept
-    : _ptr(o._ptr), _size(o._size), _pinned(o._pinned)
+    : _ptr(o._ptr),
+      _size(o._size),
+      _capacity(o._capacity),
+      _pinned(o._pinned),
+      _reservation(std::move(o._reservation)),
+      _blocks(std::move(o._blocks))
   {
-    o._ptr  = nullptr;
-    o._size = 0;
+    o._ptr      = nullptr;
+    o._size     = 0;
+    o._capacity = 0;
   }
 
   pinned_host_buffer& operator=(pinned_host_buffer&& o) noexcept
   {
     if (this != &o) {
+      _blocks.reset();
+      _reservation.reset();
       if (_ptr) {
         if (_pinned)
           cudaFreeHost(_ptr);
         else
           delete[] static_cast<uint8_t*>(_ptr);
       }
-      _ptr    = o._ptr;
-      _size   = o._size;
-      _pinned = o._pinned;
-      o._ptr  = nullptr;
-      o._size = 0;
+      _ptr         = o._ptr;
+      _size        = o._size;
+      _capacity    = o._capacity;
+      _pinned      = o._pinned;
+      _reservation = std::move(o._reservation);
+      _blocks      = std::move(o._blocks);
+      o._ptr       = nullptr;
+      o._size      = 0;
+      o._capacity  = 0;
     }
     return *this;
   }
@@ -115,15 +145,77 @@ struct pinned_host_buffer {
   pinned_host_buffer(pinned_host_buffer const&)            = delete;
   pinned_host_buffer& operator=(pinned_host_buffer const&) = delete;
 
-  [[nodiscard]] uint8_t* data() { return static_cast<uint8_t*>(_ptr); }
-  [[nodiscard]] uint8_t const* data() const { return static_cast<uint8_t const*>(_ptr); }
+  [[nodiscard]] uint8_t* data()
+  {
+    if (_blocks) { throw std::logic_error("pooled host buffer is not contiguous"); }
+    return static_cast<uint8_t*>(_ptr);
+  }
+  [[nodiscard]] uint8_t const* data() const
+  {
+    if (_blocks) { throw std::logic_error("pooled host buffer is not contiguous"); }
+    return static_cast<uint8_t const*>(_ptr);
+  }
   [[nodiscard]] std::size_t size() const { return _size; }
+  [[nodiscard]] std::size_t capacity() const { return _capacity; }
   [[nodiscard]] bool is_pinned() const { return _pinned; }
 
+  void copy_from(std::size_t offset, void const* source, std::size_t bytes)
+  {
+    if (offset > _capacity || bytes > _capacity - offset) {
+      throw std::out_of_range("host buffer write exceeds capacity");
+    }
+    if (bytes == 0) { return; }
+    if (!_blocks) {
+      std::memcpy(static_cast<uint8_t*>(_ptr) + offset, source, bytes);
+      return;
+    }
+    auto* input           = static_cast<uint8_t const*>(source);
+    const auto block_size = _blocks->block_size();
+    while (bytes != 0) {
+      const auto in_block = offset % block_size;
+      const auto count    = std::min(bytes, block_size - in_block);
+      std::memcpy(_blocks->at(offset / block_size).data() + in_block, input, count);
+      input += count;
+      offset += count;
+      bytes -= count;
+    }
+  }
+
+  cudaError_t copy_to_device(void* destination, rmm::cuda_stream_view stream) const
+  {
+    if (_size == 0) { return cudaSuccess; }
+    if (!_blocks) {
+      return cudaMemcpyAsync(destination, _ptr, _size, cudaMemcpyHostToDevice, stream.value());
+    }
+    auto* output          = static_cast<uint8_t*>(destination);
+    std::size_t remaining = _size;
+    for (std::size_t i = 0; remaining != 0; ++i) {
+      const auto block = _blocks->at(i);
+      const auto count = std::min(remaining, block.size());
+      auto status =
+        cudaMemcpyAsync(output, block.data(), count, cudaMemcpyHostToDevice, stream.value());
+      if (status != cudaSuccess) { return status; }
+      output += count;
+      remaining -= count;
+    }
+    return cudaSuccess;
+  }
+
+  void set_logical_size(std::size_t size)
+  {
+    if (size > _capacity) { throw std::out_of_range("pinned host buffer size exceeds capacity"); }
+    _size = size;
+  }
+
  private:
-  void* _ptr        = nullptr;
-  std::size_t _size = 0;
-  bool _pinned      = false;
+  void* _ptr            = nullptr;
+  std::size_t _size     = 0;
+  std::size_t _capacity = 0;
+  bool _pinned          = false;
+  // Blocks refer to the reservation arena, so return them before releasing it.
+  std::unique_ptr<cucascade::memory::reservation> _reservation;
+  std::unique_ptr<cucascade::memory::fixed_size_host_memory_resource::multiple_blocks_allocation>
+    _blocks;
 };
 
 /**
