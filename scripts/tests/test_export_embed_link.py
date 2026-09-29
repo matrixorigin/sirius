@@ -155,8 +155,9 @@ class ExportTest(unittest.TestCase):
             self.assertNotEqual(sdk.sha256(paths[3]), old)
 
     def test_source_provenance_uses_native_repository_and_marks_untracked(self):
-        header = Path("/native/repo/src/include/sirius_c.h")
+        header = Path("/native/repo/src/sirius_c.h")
         results = [
+            subprocess.CompletedProcess([], 0, "/native/repo\n", ""),
             subprocess.CompletedProcess([], 0, "a" * 40 + "\n", ""),
             subprocess.CompletedProcess([], 0, "?? src/new.cc\n", ""),
         ]
@@ -165,6 +166,7 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(provenance["source_directory"], "/native/repo")
         self.assertEqual(provenance["source_revision"], "a" * 40)
         self.assertTrue(provenance["source_dirty"])
+        self.assertIn("--show-toplevel", command.call_args_list[0].args[0])
         self.assertIn("--untracked-files=normal", command.call_args.args[0])
 
     def test_opaque_response_and_unresolved_dependency_are_rejected(self):

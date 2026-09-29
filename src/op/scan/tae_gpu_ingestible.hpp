@@ -45,6 +45,8 @@ class tae_ingestible_table_info final : public ingestible_table_info {
   duckdb::ClientContext* context = nullptr;
 
   [[nodiscard]] std::span<std::string const> column_names() const override { return names; }
+  // Diagnostics identify the scan kind without exposing manifest/object paths.
+  [[nodiscard]] std::string display_name() const override { return "tae_scan"; }
   [[nodiscard]] std::span<std::string const> file_paths() const override
   {
     return bind_data ? std::span<std::string const>(object_paths_) : std::span<std::string const>{};
@@ -65,7 +67,7 @@ class tae_scan_info final : public scan_info {
   std::shared_ptr<sirius::pinned_host_buffer> host_data;
   std::shared_ptr<sirius::embedding::tae_work_permit> work_permit;
   mutable std::shared_ptr<sirius::pinned_host_buffer> staging;
-  std::shared_ptr<io::sirius_ioctx> io_context;
+  std::shared_ptr<io::ioctx> io_context;
   std::string object_path;
   std::uint64_t object_size{0};
   bool crc_wrapped{false};
@@ -112,14 +114,14 @@ class tae_gpu_ingestible final : public gpu_ingestible {
   filtered_table materialize_metadata_to_table(
     scan_info const& info,
     const cucascade::memory::memory_space& mem_space,
-    rmm::cuda_stream_view stream,
+    ::cuda::stream_ref stream,
     bool like_swar_fastpath,
     std::shared_ptr<const sirius::like_multiliteral_cache> like_cache) override;
 
   std::unique_ptr<cudf::table> post_filter_and_project(
     filtered_table&& input,
     const cucascade::memory::memory_space& mem_space,
-    rmm::cuda_stream_view stream,
+    ::cuda::stream_ref stream,
     bool like_swar_fastpath,
     std::shared_ptr<const sirius::like_multiliteral_cache> like_cache,
     std::unique_ptr<cudf::column>* survivors,
@@ -140,7 +142,7 @@ class tae_gpu_ingestible final : public gpu_ingestible {
   [[nodiscard]] std::unique_ptr<tae_scan_info> load_object(
     std::size_t object_index,
     std::size_t block_index,
-    std::shared_ptr<io::sirius_ioctx> const& io_ctx) const;
+    std::shared_ptr<io::ioctx> const& io_ctx) const;
   [[nodiscard]] std::unique_ptr<cudf::table> make_empty_table(
     const cucascade::memory::memory_space& mem_space, rmm::cuda_stream_view stream) const;
 

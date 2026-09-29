@@ -322,10 +322,10 @@ void native_result_sink::build_pipelines(pipeline::sirius_pipeline& current,
   meta.create_child_meta_pipeline(current, *this).build(*children[0]);
 }
 std::unique_ptr<op::operator_data> native_result_sink::execute(op::operator_data const& input,
-                                                               rmm::cuda_stream_view)
+                                                               ::cuda::stream_ref)
 {
   return std::make_unique<op::pipelineable_operator_data>(
-    dynamic_cast<op::pipelineable_operator_data const&>(input).get_read_only_batches());
+    dynamic_cast<op::pipelineable_operator_data const&>(input).get_data_batches());
 }
 std::shared_ptr<terminal_admission> native_result_sink::terminal_admission_control() const
 {

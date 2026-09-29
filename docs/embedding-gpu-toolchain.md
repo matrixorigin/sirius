@@ -11,9 +11,10 @@ unchanged; a compatible NVIDIA driver and GPU remain host requirements.
 pixi run --frozen -e mo mo-build-embedding-sdk
 ```
 
-The profile-specific configure task disables `sccache` only for CUDA. The
-ordinary presets retain their launchers; the `mo` SDK avoids the observed NVCC
-temporary-PTX failure with CUDA 13.3 and sccache 0.15.
+The profile-specific configure task disables `sccache` for C, C++, and CUDA.
+The ordinary presets retain their launchers. The `mo` SDK avoids both the
+observed NVCC temporary-PTX failure and cached dependency files that name a
+different Sirius checkout, which can leave a mixed-revision C++/CUDA binary.
 
 The existing `embedding-sdk/link.json` records the exact C smoke compiler,
 link arguments, native artifacts, and source provenance. It does not export a

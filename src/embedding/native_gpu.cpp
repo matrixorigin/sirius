@@ -118,19 +118,20 @@ class native_ingestible final : public op::scan::gpu_ingestible {
   op::scan::filtered_table materialize_metadata_to_table(
     op::scan::scan_info const& info,
     cucascade::memory::memory_space const& space,
-    rmm::cuda_stream_view stream,
+    ::cuda::stream_ref stream,
     bool,
     std::shared_ptr<const like_multiliteral_cache>) override
   {
     auto const& split = dynamic_cast<native_split const&>(info);
-    return {
-      op::scan::owning_table_view(convert_native_input(*split.unit, input_->schema, space, stream)),
-      op::scan::filter_state::ROW_FILTERED_AND_PROJECTED};
+    rmm::cuda_stream_view rmm_stream{stream};
+    return {op::scan::owning_table_view(
+              convert_native_input(*split.unit, input_->schema, space, rmm_stream)),
+            op::scan::filter_state::ROW_FILTERED_AND_PROJECTED};
   }
   std::unique_ptr<cudf::table> post_filter_and_project(
     op::scan::filtered_table&& table,
     cucascade::memory::memory_space const&,
-    rmm::cuda_stream_view stream,
+    ::cuda::stream_ref stream,
     bool,
     std::shared_ptr<const like_multiliteral_cache>,
     std::unique_ptr<cudf::column>*,

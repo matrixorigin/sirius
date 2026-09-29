@@ -54,6 +54,15 @@ class TaeScanGpuFixture : public sirius::test::GpuExecutionFixture {
 
 }  // namespace
 
+TEST_CASE("TAE scan metadata provides a path-free diagnostic name", "[tae_scan][metadata]")
+{
+  sirius::op::scan::tae_ingestible_table_info info;
+  auto const& base = static_cast<sirius::op::scan::ingestible_table_info const&>(info);
+  REQUIRE(base.display_name() == "tae_scan");
+  REQUIRE(base.file_paths().empty());
+  REQUIRE(base.column_names().empty());
+}
+
 TEST_CASE_METHOD(TaeScanGpuFixture,
                  "embedded TAE mode follows its binding and respects bounded staging entitlements",
                  "[integration][gpu_execution][tae_scan][embedded_tae]")

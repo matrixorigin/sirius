@@ -21,6 +21,8 @@
 #include <tae/tae_format.hpp>
 
 // cucascade
+#include <cuda/stream>
+
 #include <cucascade/data/common.hpp>
 #include <cucascade/memory/memory_space.hpp>
 
@@ -197,7 +199,7 @@ class host_tae_representation : public cucascade::idata_representation {
                           std::unique_ptr<host_tae_input_lease> input_lease        = nullptr);
 
   // idata_representation interface
-  std::unique_ptr<idata_representation> clone(rmm::cuda_stream_view stream) override;
+  std::unique_ptr<idata_representation> clone(::cuda::stream_ref stream) override;
   [[nodiscard]] std::size_t get_size_in_bytes() const override;
   [[nodiscard]] std::size_t get_uncompressed_data_size_in_bytes() const override;
 
