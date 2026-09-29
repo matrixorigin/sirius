@@ -4,6 +4,7 @@
 #include "embedding/control.hpp"
 #include "embedding/tae_demand.hpp"
 #include "helper/type_conversions.hpp"
+#include "io/io_context.hpp"
 #include "op/scan/sirius_gpu_scan_operator_data.hpp"
 #include "op/scan/tae_gpu_ingestible.hpp"
 #include "scan/test_utils.hpp"
@@ -16,8 +17,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 
 using namespace sirius;
 using namespace sirius::embedding;
@@ -25,7 +28,7 @@ using namespace sirius::op::scan;
 using namespace std::chrono_literals;
 
 namespace {
-struct counted_object final : io::sirius_io_object {
+struct counted_object final : io::io_object {
   std::string path;
   std::size_t bytes;
   counted_object(std::string p, std::size_t n) : path(std::move(p)), bytes(n) {}
@@ -36,7 +39,7 @@ struct counted_object final : io::sirius_io_object {
 
 // An instrumented sparse range backend: large-object tests never construct a
 // hidden full host payload in their fixture. Only the requested slice is filled.
-struct counted_io final : io::sirius_ioctx {
+struct counted_io final : io::ioctx {
   std::size_t bytes{0};
   std::function<void(std::size_t, std::size_t, std::uint8_t*)> fill;
   std::atomic<std::size_t> reads{0}, largest_read{0};
@@ -47,17 +50,14 @@ struct counted_io final : io::sirius_ioctx {
   bool supports_device_read() const noexcept override { return false; }
   bool supports_host_to_device_read() const noexcept override { return false; }
   bool supports_vector_host_read() const noexcept override { return false; }
-  io::cache::prefetching_stage preferred_prefetching_stage() const noexcept override
-  {
-    return io::cache::prefetching_stage::none;
-  }
+  bool supports_device_range_read() const noexcept override { return false; }
   std::vector<cudf::io::text::byte_range_info> align_and_coalesce(
     std::span<const cudf::io::text::byte_range_info> ranges,
     std::optional<std::size_t>) const noexcept override
   {
     return {ranges.begin(), ranges.end()};
   }
-  std::size_t host_read_io(io::sirius_io_object const&,
+  std::size_t host_read_io(io::io_object const&,
                            std::size_t offset,
                            std::size_t count,
                            std::uint8_t* target) override
@@ -68,39 +68,26 @@ struct counted_io final : io::sirius_ioctx {
     fill(offset, count, target);
     return count;
   }
-  exec::semi_future<std::size_t> host_read_async_io(io::sirius_io_object const&,
-                                                    std::size_t,
-                                                    std::size_t,
-                                                    std::uint8_t*) noexcept override
+  exec::semi_future<std::size_t> host_read_async_io(io::io_object const& object,
+                                                    std::size_t offset,
+                                                    std::size_t count,
+                                                    std::uint8_t* target) noexcept override
   {
-    return {};
+    try {
+      return exec::make_semi_future<std::size_t>(host_read_io(object, offset, count, target));
+    } catch (...) {
+      return exec::make_semi_future<std::size_t>(std::current_exception());
+    }
   }
-  exec::semi_future<std::size_t> device_read_async_io(io::sirius_io_object const&,
-                                                      std::size_t,
-                                                      std::size_t,
-                                                      std::uint8_t*,
-                                                      rmm::cuda_stream_view) noexcept override
+  exec::semi_future<std::size_t> mixed_readv_async_io(
+    io::io_object const&, std::vector<io::prepared_io_slice>&&) noexcept override
   {
-    return {};
-  }
-  exec::semi_future<std::size_t> host_to_device_read_async_io(
-    io::sirius_io_object const&,
-    std::span<io::io_object_segment>,
-    std::size_t,
-    std::size_t,
-    std::uint8_t*,
-    rmm::cuda_stream_view) noexcept override
-  {
-    return {};
-  }
-  exec::semi_future<std::size_t> host_read_ranges_async_io(
-    io::sirius_io_object const&, std::span<io::io_object_segment>) noexcept override
-  {
-    return {};
+    return exec::make_semi_future<std::size_t>(
+      std::make_exception_ptr(std::logic_error("unexpected batched I/O in counted test backend")));
   }
 
  protected:
-  std::shared_ptr<io::sirius_io_object> create_io_object(std::string path) override
+  std::shared_ptr<io::io_object> create_io_object(std::string path) override
   {
     return std::make_shared<counted_object>(std::move(path), bytes);
   }

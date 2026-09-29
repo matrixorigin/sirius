@@ -158,9 +158,10 @@ constexpr uint32_t VARLENA_STRUCT_SIZE = 24;
 std::unique_ptr<cucascade::idata_representation> convert_host_tae_to_gpu(
   cucascade::idata_representation& source,
   cucascade::memory::memory_space const* target_memory_space,
-  rmm::cuda_stream_view stream,
+  ::cuda::stream_ref native_stream,
   cucascade::memory::reservation* /*reservation*/)
 {
+  rmm::cuda_stream_view stream{native_stream};
   auto& host_src                         = source.cast<host_tae_representation>();
   auto const& chunks                     = host_src.get_column_chunks();
   auto const& post_filter_projection_ids = host_src.get_post_filter_projection_ids();

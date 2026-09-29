@@ -718,9 +718,7 @@ gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
 }
 
 std::unique_ptr<tae_scan_info> tae_gpu_ingestible::load_object(
-  std::size_t object_index,
-  std::size_t block_index,
-  std::shared_ptr<io::sirius_ioctx> const& io_ctx) const
+  std::size_t object_index, std::size_t block_index, std::shared_ptr<io::ioctx> const& io_ctx) const
 {
   if (_metadata_stop.stop_requested()) return std::make_unique<tae_scan_info>();
   auto const& object   = _info->bind_data->objects.at(object_index);
@@ -871,10 +869,11 @@ std::unique_ptr<cudf::table> tae_gpu_ingestible::make_empty_table(
 filtered_table tae_gpu_ingestible::materialize_metadata_to_table(
   scan_info const& generic_info,
   const cucascade::memory::memory_space& mem_space,
-  rmm::cuda_stream_view stream,
+  ::cuda::stream_ref native_stream,
   bool,
   std::shared_ptr<const sirius::like_multiliteral_cache>)
 {
+  rmm::cuda_stream_view stream{native_stream};
   auto const& info = dynamic_cast<tae_scan_info const&>(generic_info);
   if ((!info.host_data && !info.work_permit) || info.chunks.empty()) {
     return {.table = owning_table_view{make_empty_table(mem_space, stream)},
@@ -902,20 +901,21 @@ filtered_table tae_gpu_ingestible::materialize_metadata_to_table(
       });
   }
   auto gpu = sirius::converter_registry::get().convert<cucascade::gpu_table_representation>(
-    host, &mem_space, stream);
-  return {.table = owning_table_view{gpu->release_table(stream)},
+    host, &mem_space, native_stream);
+  return {.table = owning_table_view{gpu->release_table(native_stream)},
           .state = filter_state::UNFILTERED};
 }
 
 std::unique_ptr<cudf::table> tae_gpu_ingestible::post_filter_and_project(
   filtered_table&& input,
   const cucascade::memory::memory_space& mem_space,
-  rmm::cuda_stream_view stream,
+  ::cuda::stream_ref native_stream,
   bool like_swar_fastpath,
   std::shared_ptr<const sirius::like_multiliteral_cache> like_cache,
   std::unique_ptr<cudf::column>* survivors,
   std::span<std::size_t const> elided)
 {
+  rmm::cuda_stream_view stream{native_stream};
   rmm::device_async_resource_ref mr_ref(mem_space.get_default_allocator());
   auto output_positions = _plan.post_filter_projection_ids;
   if (output_positions.empty() && !_info->output_types.empty()) {

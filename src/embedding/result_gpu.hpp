@@ -33,8 +33,7 @@ class native_result_sink final : public op::sirius_physical_operator {
                      std::shared_ptr<result_publisher> publisher);
   bool is_sink() const override { return true; }
   void build_pipelines(pipeline::sirius_pipeline&, pipeline::sirius_meta_pipeline&) override;
-  std::unique_ptr<op::operator_data> execute(op::operator_data const&,
-                                             rmm::cuda_stream_view) override;
+  std::unique_ptr<op::operator_data> execute(op::operator_data const&, ::cuda::stream_ref) override;
   std::shared_ptr<terminal_admission> terminal_admission_control() const override;
   void sink_admitted(op::operator_data const&,
                      rmm::cuda_stream_view,
