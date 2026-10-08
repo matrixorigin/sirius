@@ -1,0 +1,10 @@
+// Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+package matrixone.sirius.numeric.v1;
+option go_package = "github.com/matrixorigin/matrixone/pkg/pb/siriusnumeric";
+
+// Type parameters carry physical width, precision and scale; this payload is
+// exactly the signed little-endian two's-complement coefficient for that width.
+message ExactDecimalLiteral {
+  bytes coefficient_le = 1;
+}

@@ -563,6 +563,13 @@ class expression_evaluator {
   evaluate_result evaluate(sirius::ast::function_call const& expr, evaluation_mode mode);
   // Runs the function's libcudf kernel, whose result may be narrower than the declared type.
   evaluate_result evaluate_function_kernel(sirius::ast::function_call const& expr);
+  evaluate_result evaluate_decimal_function(sirius::ast::function_call const& expr,
+                                            evaluation_mode mode);
+  bool const* _mo_active_rows{nullptr};
+  std::optional<bool> _has_mo_expressions;
+  evaluate_result evaluate_mo_case(ast::case_expr const& expression, evaluation_mode mode);
+  evaluate_result evaluate_mo_coalesce(ast::coalesce const& expression, evaluation_mode mode);
+  bool uses_mo_expressions();
   evaluate_result evaluate(sirius::ast::unary_op const& expr, evaluation_mode mode);
   evaluate_result evaluate(sirius::ast::coalesce const& expr, evaluation_mode mode);
   evaluate_result evaluate(sirius::ast::in_list const& expr, evaluation_mode mode);

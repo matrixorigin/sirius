@@ -42,7 +42,7 @@ struct function_signature {
 
 constexpr std::size_t kVariadic = std::numeric_limits<std::size_t>::max();
 
-constexpr std::array<function_signature, 43> kSignatures = {{
+constexpr std::array<function_signature, 57> kSignatures = {{
   {"+", function_id::add, 2, 2},
   {"add", function_id::add, 2, 2},
   {"-", function_id::sub, 2, 2},
@@ -87,23 +87,81 @@ constexpr std::array<function_signature, 43> kSignatures = {{
   {"-", function_id::negate, 1, 1},
   {"subtract", function_id::negate, 1, 1},
   {"negate", function_id::negate, 1, 1},  // Substrait spelling
+  {"__sirius_mo_decimal_add", function_id::mo_decimal_add, 2, 2},
+  {"__sirius_mo_decimal_subtract", function_id::mo_decimal_subtract, 2, 2},
+  {"__sirius_mo_decimal_multiply", function_id::mo_decimal_multiply, 2, 2},
+  {"__sirius_mo_decimal_divide", function_id::mo_decimal_divide, 2, 2},
+  {"__sirius_mo_decimal_integer_divide", function_id::mo_decimal_integer_divide, 2, 2},
+  {"__sirius_mo_decimal_modulo", function_id::mo_decimal_modulo, 2, 2},
+  {"__sirius_mo_decimal_negate", function_id::mo_decimal_negate, 1, 1},
+  {"__sirius_mo_decimal_cast", function_id::mo_decimal_cast, 1, 1},
+  {"__sirius_mo_decimal_equal", function_id::mo_decimal_equal, 2, 2},
+  {"__sirius_mo_decimal_not_equal", function_id::mo_decimal_not_equal, 2, 2},
+  {"__sirius_mo_decimal_less", function_id::mo_decimal_less, 2, 2},
+  {"__sirius_mo_decimal_less_equal", function_id::mo_decimal_less_equal, 2, 2},
+  {"__sirius_mo_decimal_greater", function_id::mo_decimal_greater, 2, 2},
+  {"__sirius_mo_decimal_greater_equal", function_id::mo_decimal_greater_equal, 2, 2},
 }};
 
 // Reverse table: Sirius function id -> canonical DuckDB function name.
 // Indexed directly by enum value; never searched.
-constexpr std::array<std::string_view, 35> kReverseTable = {
-  "+",          "-",         "*",           "/",           "//",
-  "%",          "substring", "~~",          "!~~",         "contains",
-  "prefix",     "suffix",    "strlen",      "length",      "regexp_replace",
-  "concat",     "||",        "year",        "month",       "day",
-  "hour",       "minute",    "second",      "millisecond", "microsecond",
-  "date_trunc", "row",       "struct_pack", "error",       "constant_or_null",
-  "upper",      "lower",     "round",       "abs",         "-"};
+constexpr std::array<std::string_view, 49> kReverseTable = {
+  "+",
+  "-",
+  "*",
+  "/",
+  "//",
+  "%",
+  "substring",
+  "~~",
+  "!~~",
+  "contains",
+  "prefix",
+  "suffix",
+  "strlen",
+  "length",
+  "regexp_replace",
+  "concat",
+  "||",
+  "year",
+  "month",
+  "day",
+  "hour",
+  "minute",
+  "second",
+  "millisecond",
+  "microsecond",
+  "date_trunc",
+  "row",
+  "struct_pack",
+  "error",
+  "constant_or_null",
+  "upper",
+  "lower",
+  "round",
+  "abs",
+  "-",
+  "__sirius_mo_decimal_add",
+  "__sirius_mo_decimal_subtract",
+  "__sirius_mo_decimal_multiply",
+  "__sirius_mo_decimal_divide",
+  "__sirius_mo_decimal_integer_divide",
+  "__sirius_mo_decimal_modulo",
+  "__sirius_mo_decimal_negate",
+  "__sirius_mo_decimal_cast",
+  "__sirius_mo_decimal_equal",
+  "__sirius_mo_decimal_not_equal",
+  "__sirius_mo_decimal_less",
+  "__sirius_mo_decimal_less_equal",
+  "__sirius_mo_decimal_greater",
+  "__sirius_mo_decimal_greater_equal",
+};
 
-static_assert(static_cast<std::size_t>(function_id::negate) + 1 == 35,
-              "function_id::negate must be the last entry; cardinality locked at 35.");
-static_assert(kReverseTable.size() == 35,
+static_assert(static_cast<std::size_t>(function_id::abs) + 1 == 34,
+              "Ordinary function IDs must retain their original ABI values.");
+static_assert(kReverseTable.size() == 49,
               "kReverseTable must have one slot per function_id value.");
+static_assert(static_cast<std::size_t>(function_id::mo_decimal_greater_equal) + 1 == 49);
 
 // Each id has exactly one row named as in kReverseTable, and rows sharing a name have disjoint
 // arities, so a (name, argument count) pair resolves to at most one id.

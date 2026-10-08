@@ -17,6 +17,7 @@
 #include "expression/value.hpp"
 
 #include "helper/type_conversions.hpp"
+#include "numeric/decimal_types.hpp"
 #include "sirius/exception.hpp"
 
 // duckdb
@@ -38,8 +39,13 @@ value from_duckdb(const duckdb::Value& v, const logical_type& type)
   // Typed NULL fidelity — every IsNull() input becomes null_value, regardless
   // of the value's logical type. The SQL type of the NULL is recovered later
   // via the supplied logical_type at the to_duckdb boundary.
-  if (v.IsNull()) { return value{null_value{}}; }
+  if (v.IsNull()) {
+    if (type.is_mo_decimal() && type.nullability() == 1)
+      throw std::invalid_argument("NULL MO decimal literal has a required type");
+    return value{null_value{}};
+  }
 
+  if (type.is_mo_decimal()) return value{mo_decimal::from_duckdb_value(v, type)};
   switch (type.id()) {
     case type_id::BOOLEAN: return value{v.GetValue<bool>()};
     case type_id::TINYINT: return value{v.GetValue<int8_t>()};
@@ -101,8 +107,14 @@ duckdb::Value to_duckdb(const value& v, const logical_type& type)
   // Typed NULL recovery — null_value plus the supplied type yields a
   // typed-null duckdb::Value via the `Value(LogicalType)` ctor. Reuses the
   // sirius::to_duckdb(logical_type) overload from helper/type_conversions.hpp.
-  if (std::holds_alternative<null_value>(v)) { return duckdb::Value(to_duckdb(type)); }
+  if (std::holds_alternative<null_value>(v)) {
+    if (type.is_mo_decimal() && type.nullability() == 1)
+      throw std::invalid_argument("NULL MO decimal literal has a required type");
+    return duckdb::Value(to_duckdb(type));
+  }
 
+  if (type.is_mo_decimal())
+    return mo_decimal::duckdb_value(std::get<mo_decimal::coefficient>(v), type);
   switch (type.id()) {
     case type_id::BOOLEAN: return duckdb::Value::BOOLEAN(std::get<bool>(v));
     case type_id::TINYINT: return duckdb::Value::TINYINT(std::get<int8_t>(v));
