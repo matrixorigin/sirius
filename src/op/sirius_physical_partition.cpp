@@ -89,6 +89,9 @@ sirius_physical_partition::sirius_physical_partition(duckdb::vector<sirius::logi
   if (!_spec.key_cast_types.empty() && _spec.key_cast_types.size() != _spec.key_columns.size()) {
     throw std::invalid_argument("partition key/cast count mismatch");
   }
+  if (!_spec.exact_types.empty() && _spec.exact_types.size() != _spec.key_columns.size()) {
+    throw std::invalid_argument("partition exact-key descriptors do not match keys");
+  }
   for (auto key : _spec.key_columns) {
     if (key < 0 || static_cast<std::size_t>(key) >= this->types.size()) {
       throw std::invalid_argument("partition key is outside the input schema");
@@ -229,7 +232,8 @@ std::unique_ptr<operator_data> sirius_physical_partition::execute(const operator
                                                            count,
                                                            stream,
                                                            *space,
-                                                           batch_telemetry());
+                                                           batch_telemetry(),
+                                                           _spec.exact_types);
   std::vector<std::size_t> destinations(partitioned_results.size());
   std::iota(destinations.begin(), destinations.end(), std::size_t{0});
   auto result =

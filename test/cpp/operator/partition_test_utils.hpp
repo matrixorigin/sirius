@@ -27,6 +27,7 @@ inline op::partition_spec hash_partition_spec(op::sirius_physical_hash_join cons
   for (auto const& key : join.prepared_keys()) {
     spec.key_columns.push_back(build ? key.right_index : key.left_index);
     spec.key_cast_types.push_back(key.type);
+    spec.exact_types.push_back(build ? key.right_exact : key.left_exact);
   }
   return spec;
 }

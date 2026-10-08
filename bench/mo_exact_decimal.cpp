@@ -1,9 +1,11 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "expression/ast/node.hpp"
 #include "expression_evaluator/expression_evaluator.hpp"
+#include "numeric/decimal_aggregate_layout.hpp"
 #include "numeric/exact_decimal_gpu.hpp"
 
 #include <cudf/binaryop.hpp>
+#include <cudf/reduction.hpp>
 #include <cudf/unary.hpp>
 #include <cudf/utilities/error.hpp>
 
@@ -79,6 +81,16 @@ int main()
   auto b = input(narrow, stream.view(), mr);
   auto x = input(wide, stream.view(), mr);
   auto y = input(wide, stream.view(), mr);
+  // Ramp idle-device clocks before the fixed per-case warm-ups. Keep this
+  // bounded and identical for every run; do not change device clock settings.
+  auto warm_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    auto ordinary = cudf::binary_operation(
+      a->view(), b->view(), cudf::binary_operator::ADD, a->type(), stream.view(), mr);
+    auto checked = evaluate_decimal_columns(
+      decimal_op::divide, x->view(), wide, y->view(), wide, wide, nullptr, stream.view(), mr);
+    stream.synchronize();
+  } while (std::chrono::steady_clock::now() < warm_until);
   std::cout << "case,rows,repetition,wall_ms,rows_per_second\n";
   for (auto operation : {decimal_op::add, decimal_op::multiply}) {
     auto out = operation == decimal_op::add ? narrow : decimal_type{128, 38, 0};
@@ -138,4 +150,32 @@ int main()
       return evaluator.evaluate(cudf::table_view{{a->view(), b->view()}});
     });
   }
+  // At this fixed row bound, even the entire signed physical input domain
+  // fits the declared 128-bit result. Widen before the ordinary reduction so
+  // both paths include safe accumulation, allocation and stream completion.
+  measure("cudf_sum64_to128", stream.view(), [&] {
+    auto widened =
+      cudf::cast(a->view(), cudf::data_type{cudf::type_id::DECIMAL128, 0}, stream.view(), mr);
+    auto result = cudf::reduce(widened->view(),
+                               *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
+                               widened->type(),
+                               stream.view(),
+                               mr);
+    stream.synchronize();
+    return result;
+  });
+  duckdb::vector<std::unique_ptr<sirius::ast::node>> aggregates;
+  std::vector<std::unique_ptr<sirius::ast::node>> args;
+  args.push_back(std::make_unique<sirius::ast::node>(
+    sirius::ast::reference{0, sirius::logical_type::make_mo_decimal({64, 15, 0}, false)}));
+  aggregates.push_back(std::make_unique<sirius::ast::node>(
+    sirius::ast::aggregate{sirius::aggregate_id::mo_decimal_sum,
+                           std::move(args),
+                           sirius::logical_type::make_mo_decimal({128, 37, 0}, true),
+                           false}));
+  auto layout = make_aggregate_layout({}, aggregates);
+  measure("exact_sum64_to128", stream.view(), [&] {
+    auto state = local_aggregate_table(cudf::table_view{{a->view()}}, *layout, stream.view(), mr);
+    return merge_aggregate_tables({state->view()}, *layout, stream.view(), mr);
+  });
 }

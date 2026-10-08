@@ -46,6 +46,7 @@
 #include "embedding/plan_bindings.hpp"
 #include "io/uri_parser.hpp"
 #include "log/logging.hpp"
+#include "numeric/decimal_types.hpp"
 #include "op/dynamic_filter/sirius_dynamic_filter.hpp"
 #include "op/dynamic_filter/sirius_physical_build_filter.hpp"
 #include "op/partition/consumer_partition_policy.hpp"
@@ -178,6 +179,8 @@ uint64_t reserve_standalone_plan_generation()
 
 bool is_nested_logical_type(duckdb::LogicalType const& type)
 {
+  if (auto exact = mo_decimal::from_duckdb_type(type); exact && exact->is_mo_decimal())
+    return false;
   auto const id = type.id();
   return duckdb::StructType::IsStruct(id) || id == duckdb::LogicalTypeId::LIST ||
          id == duckdb::LogicalTypeId::MAP;
@@ -1419,7 +1422,9 @@ void wrap_hash_group_by(duckdb::unique_ptr<sirius::op::sirius_physical_operator>
     bool const has_supported_count_distinct_layout =
       grouped.has_count_distinct && !grouped.has_avg && !hgb_ptr->has_physical_overrides() &&
       hgb_ptr->types.size() == grouped.num_output_group_columns() + grouped.aggregate_slots.size();
-    if (grouped.has_stddev_samp()) {
+    if (grouped.exact_layout) {
+      hgb_ptr->types = grouped.get_local_output_types();
+    } else if (grouped.has_stddev_samp()) {
       hgb_ptr->types = grouped.local_types;
     } else if (has_supported_count_distinct_layout) {
       hgb_ptr->types = grouped.get_count_distinct_local_output_types();
@@ -1601,6 +1606,7 @@ void wrap_join_child(sirius::op::sirius_physical_operator& join_op,
     for (auto const& key : join_op.Cast<sirius::op::sirius_physical_hash_join>().prepared_keys()) {
       spec.key_columns.push_back(is_build ? key.right_index : key.left_index);
       spec.key_cast_types.push_back(key.type);
+      spec.exact_types.push_back(is_build ? key.right_exact : key.left_exact);
     }
   } else {
     spec.mode = sirius::op::partition_mode::single;

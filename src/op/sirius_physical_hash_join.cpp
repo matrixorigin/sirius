@@ -41,6 +41,7 @@
 #include "helper/numeric_narrowing.hpp"
 #include "helper/type_conversions.hpp"
 #include "log/logging.hpp"
+#include "numeric/decimal_aggregate_gpu.hpp"
 #include "op/dynamic_filter/dynamic_filter_publisher.hpp"
 #include "op/dynamic_filter/sirius_dynamic_filter.hpp"
 #include "op/key_preparation.hpp"
@@ -531,20 +532,29 @@ sirius_physical_hash_join::sirius_physical_hash_join(
     auto const& left_ref  = condition.left->get<sirius::ast::reference>();
     auto const& right_ref = condition.right->get<sirius::ast::reference>();
     auto const type       = sirius::require_cudf_type(left_ref.return_type());
-    if (type != sirius::require_cudf_type(right_ref.return_type())) {
+    auto const left_type = left_ref.return_type();
+    auto const right_type = right_ref.return_type();
+    if (left_type.is_mo_decimal() != right_type.is_mo_decimal()) {
+      throw std::invalid_argument("MO decimal join key requires two exact operands");
+    }
+    auto const left_exact = left_type.is_mo_decimal() ? left_type.mo_decimal_type() : mo_decimal::decimal_type{};
+    auto const right_exact = right_type.is_mo_decimal() ? right_type.mo_decimal_type() : mo_decimal::decimal_type{};
+    if (!left_exact.bits && type != sirius::require_cudf_type(right_type)) {
       throw duckdb::NotImplementedException("Join key operands must have matching physical types");
     }
     bool const hash_key = is_hash_equality_key(condition.comparison, route_null_safe);
     _prepared_keys.push_back({static_cast<cudf::size_type>(left_ref.column_index),
                               static_cast<cudf::size_type>(right_ref.column_index),
                               type,
-                              hash_key});
+                              hash_key, left_exact, right_exact});
     if (!hash_key) { continue; }
     is_all_inequality_join = false;
     ++num_equality_conditions;
     left_key_col_indices.push_back(left_ref.column_index);
     right_key_col_indices.push_back(right_ref.column_index);
     _hash_key_types.push_back(type);
+    _left_exact_types.push_back(left_exact);
+    _right_exact_types.push_back(right_exact);
   }
 
   // Mixed join: has at least one equality condition (for hashing) and at least one inequality
@@ -1459,6 +1469,7 @@ struct join_side_keys_result {
 static join_side_keys_result prepare_join_keys(const ::cucascade::read_only_data_batch& input_batch,
                                                const std::vector<cudf::size_type>& key_col_indices,
                                                const std::vector<cudf::data_type>& key_types,
+                                               const std::vector<mo_decimal::decimal_type>& exact_types,
                                                ::cuda::stream_ref stream)
 {
   join_side_keys_result result;
@@ -1469,8 +1480,15 @@ static join_side_keys_result prepare_join_keys(const ::cucascade::read_only_data
       throw std::out_of_range("prepare_join_keys: key column is outside the input batch");
     }
     auto const column = table.column(idx);
-    auto restored =
-      restore_prepared_key(column, key_types[i], stream, cudf::get_current_device_resource_ref());
+    if (exact_types[i].bits) {
+      auto key = mo_decimal::make_equality_key(column, exact_types[i], stream,
+        input_batch.get_memory_space()->get_default_allocator());
+      result.key_views.push_back(key->view());
+      result.owned_cast_columns.push_back(std::move(key));
+      continue;
+    }
+    auto restored     = restore_prepared_key(
+      column, key_types[i], stream, cudf::get_current_device_resource_ref());
     result.key_views.push_back(restored ? restored->view() : column);
     if (restored) { result.owned_cast_columns.push_back(std::move(restored)); }
   }
@@ -1923,7 +1941,7 @@ std::unique_ptr<operator_data> sirius_physical_hash_join::execute(const operator
       }
       auto const& build_batch_ro = input_batches[1];
       auto build_keys_result =
-        prepare_join_keys(build_batch_ro, right_key_col_indices, _hash_key_types, stream);
+        prepare_join_keys(build_batch_ro, right_key_col_indices, _hash_key_types, _right_exact_types, stream);
       cudf::table_view build_keys = build_keys_result.keys;
       {
         // This partition's slot has a single writer — the one SCHEDULED build task — and no probe
@@ -1974,7 +1992,7 @@ std::unique_ptr<operator_data> sirius_physical_hash_join::execute(const operator
       // Hash table is built, we can process probe batches. The probe-side keys will be processed in
       // the same way as the mixed join path, but with an equality-only predicate.
       auto probe_keys_result =
-        prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, stream);
+        prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, _left_exact_types, stream);
       cudf::table_view probe_keys = probe_keys_result.keys;
 
       left_full = get_cudf_table_view(input_batches[0]);
@@ -2069,9 +2087,9 @@ std::unique_ptr<operator_data> sirius_physical_hash_join::execute(const operator
     // Mixed join: equality conditions drive the hash table; inequality conditions are evaluated
     // via a cuDF AST binary predicate on the full input tables.
     auto left_keys_result =
-      prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, stream);
+      prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, _left_exact_types, stream);
     auto right_keys_result =
-      prepare_join_keys(input_batches[1], right_key_col_indices, _hash_key_types, stream);
+      prepare_join_keys(input_batches[1], right_key_col_indices, _hash_key_types, _right_exact_types, stream);
     cudf::table_view left_eq  = left_keys_result.keys;
     cudf::table_view right_eq = right_keys_result.keys;
 
@@ -2176,9 +2194,9 @@ std::unique_ptr<operator_data> sirius_physical_hash_join::execute(const operator
     left_full  = get_cudf_table_view(input_batches[0]);
     right_full = get_cudf_table_view(input_batches[1]);
     auto left_keys_result =
-      prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, stream);
+      prepare_join_keys(input_batches[0], left_key_col_indices, _hash_key_types, _left_exact_types, stream);
     auto right_keys_result =
-      prepare_join_keys(input_batches[1], right_key_col_indices, _hash_key_types, stream);
+      prepare_join_keys(input_batches[1], right_key_col_indices, _hash_key_types, _right_exact_types, stream);
     cudf::table_view left_keys  = left_keys_result.keys;
     cudf::table_view right_keys = right_keys_result.keys;
 

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "numeric/decimal_type.hpp"
 #include "op/partition_placement.hpp"
 
 #include <cudf/types.hpp>
@@ -44,6 +45,9 @@ struct partition_spec {
 
   /// Per-key cast before hashing (e.g. INT32 vs INT64). Empty = hash as-is. Ignored in broadcast.
   std::vector<cudf::data_type> key_cast_types;
+
+  /// Per-key exact decimal descriptors for canonical equality hashing. Empty = ordinary keys.
+  std::vector<mo_decimal::decimal_type> exact_types;
 
   partition_spec() = default;
 

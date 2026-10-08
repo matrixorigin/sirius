@@ -39,6 +39,9 @@
 #include <vector>
 
 namespace sirius {
+namespace mo_decimal {
+struct aggregate_layout;
+}
 namespace op {
 
 /**
@@ -181,6 +184,7 @@ struct AggregateSlot {
  * @brief Result of converting DuckDB aggregate expressions to cuDF compute definitions.
  */
 struct CudfAggregateDefinitions {
+  std::shared_ptr<mo_decimal::aggregate_layout const> exact_layout;
   std::vector<int> group_idx;                            ///< Column indices for GROUP BY keys
   std::vector<cudf::aggregation::Kind> cudf_aggregates;  ///< cuDF aggregation types (expanded: 2
                                                          ///< entries per AVG)

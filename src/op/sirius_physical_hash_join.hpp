@@ -598,6 +598,7 @@ class sirius_physical_hash_join : public sirius_physical_partition_consumer_oper
     cudf::size_type right_index;
     cudf::data_type type;
     bool hash_key;
+    mo_decimal::decimal_type left_exact{}, right_exact{};
   };
   /// Includes routed NULL-safe equalities for the existing partition-routing contract.
   [[nodiscard]] std::vector<prepared_key> const& prepared_keys() const { return _prepared_keys; }
@@ -605,6 +606,7 @@ class sirius_physical_hash_join : public sirius_physical_partition_consumer_oper
  protected:
   std::vector<prepared_key> _prepared_keys;
   std::vector<cudf::data_type> _hash_key_types;
+  std::vector<mo_decimal::decimal_type> _left_exact_types, _right_exact_types;
 
   dynamic_filter_publication_session _dynamic_filter_session;
   // Non-owning; SiriusContext outlives the plan.

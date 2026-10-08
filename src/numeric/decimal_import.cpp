@@ -2,6 +2,7 @@
 #include "numeric/decimal_import.hpp"
 
 #include "from_substrait.hpp"
+#include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
 #include "numeric/exact_decimal.hpp"
 
@@ -85,7 +86,7 @@ class importer final : public duckdb::SubstraitExtensionHandler {
     auto type           = descriptor(user);
     auto const& any     = user.value();
     auto const& payload = any.value();
-    if (any.type_url() != literal_type_url)
+    if (any.type_url() != literal_type_url || payload.size() > (16u << 20))
       throw std::invalid_argument("invalid MO exact-decimal literal encoding");
     // Parse the approved protobuf using the pinned reader, including ordinary
     // unknown-field and singular-field semantics. Only the final coefficient
@@ -135,8 +136,42 @@ class importer final : public duckdb::SubstraitExtensionHandler {
     return duckdb::make_uniq<duckdb::FunctionExpression>(std::string(to_duckdb_function_name(*id)),
                                                          std::move(children));
   }
+  duckdb::unique_ptr<duckdb::ParsedExpression> Aggregate(
+    duckdb::ClientContext&,
+    duckdb::SubstraitExtensionIdentity const& identity,
+    substrait::AggregateFunction const& aggregate,
+    duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>> children) const override
+  {
+    if (!Handles(identity) || !aggregate.has_output_type() || children.size() != 1 ||
+        aggregate.arguments_size() != 1 || aggregate.options_size() || aggregate.sorts_size() ||
+        aggregate.invocation() != substrait::AggregateFunction::AGGREGATION_INVOCATION_ALL ||
+        aggregate.phase() != substrait::AGGREGATION_PHASE_INITIAL_TO_RESULT)
+      throw std::invalid_argument("unsupported MO exact-decimal aggregate signature or modifiers");
+    auto id = from_duckdb_aggregate_name("__sirius_" + identity.name);
+    if (!id || !is_decimal_aggregate(*id))
+      throw std::invalid_argument("unknown MO aggregate identity");
+    auto output = result_type(aggregate.output_type(), anchors_);
+    children.push_back(
+      duckdb::make_uniq<duckdb::ConstantExpression>(duckdb::Value(duckdb_type(output))));
+    return duckdb::make_uniq<duckdb::FunctionExpression>(std::string(to_duckdb_aggregate_name(*id)),
+                                                         std::move(children));
+  }
 };
 }  // namespace
+logical_type import_result_type(substrait::Type const& type, std::vector<uint32_t> const& anchors)
+{
+  return result_type(type, anchors);
+}
+bool uses_exact_decimal(std::string_view bytes)
+{
+  if (bytes.size() > (16u << 20)) throw std::invalid_argument("MO numeric plan exceeds 16 MiB");
+  substrait::Plan plan;
+  if (!plan.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())))
+    throw std::invalid_argument("invalid MO numeric plan");
+  for (auto const& uri : plan.extension_urns())
+    if (uri.urn() == extension_uri) return true;
+  return false;
+}
 duckdb::shared_ptr<duckdb::SubstraitExtensionHandler> make_import_handler(std::string_view bytes)
 {
   if (bytes.size() > (16u << 20)) throw std::invalid_argument("MO numeric plan exceeds 16 MiB");
