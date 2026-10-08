@@ -30,7 +30,7 @@ namespace {
 // Forward table: DuckDB function name -> Sirius function id.
 // Symbolic SQL operators and their Substrait spellings resolve to the same ids.
 // Linear scan; called once per BoundFunctionExpression at executor entry.
-constexpr std::array<std::pair<std::string_view, function_id>, 40> kForwardTable = {{
+constexpr std::array<std::pair<std::string_view, function_id>, 54> kForwardTable = {{
   {"+", function_id::add},
   {"add", function_id::add},
   {"-", function_id::sub},
@@ -71,24 +71,80 @@ constexpr std::array<std::pair<std::string_view, function_id>, 40> kForwardTable
   {"lower", function_id::lower},
   {"round", function_id::round},
   {"abs", function_id::abs},
+  {"__sirius_mo_decimal_add", function_id::mo_decimal_add},
+  {"__sirius_mo_decimal_subtract", function_id::mo_decimal_subtract},
+  {"__sirius_mo_decimal_multiply", function_id::mo_decimal_multiply},
+  {"__sirius_mo_decimal_divide", function_id::mo_decimal_divide},
+  {"__sirius_mo_decimal_integer_divide", function_id::mo_decimal_integer_divide},
+  {"__sirius_mo_decimal_modulo", function_id::mo_decimal_modulo},
+  {"__sirius_mo_decimal_negate", function_id::mo_decimal_negate},
+  {"__sirius_mo_decimal_cast", function_id::mo_decimal_cast},
+  {"__sirius_mo_decimal_equal", function_id::mo_decimal_equal},
+  {"__sirius_mo_decimal_not_equal", function_id::mo_decimal_not_equal},
+  {"__sirius_mo_decimal_less", function_id::mo_decimal_less},
+  {"__sirius_mo_decimal_less_equal", function_id::mo_decimal_less_equal},
+  {"__sirius_mo_decimal_greater", function_id::mo_decimal_greater},
+  {"__sirius_mo_decimal_greater_equal", function_id::mo_decimal_greater_equal},
 }};
 
 // Reverse table: Sirius function id -> canonical DuckDB function name.
 // Indexed directly by enum value; never searched.
-constexpr std::array<std::string_view, 34> kReverseTable = {
-  "+",          "-",         "*",           "/",           "//",
-  "%",          "substring", "~~",          "!~~",         "contains",
-  "prefix",     "suffix",    "strlen",      "length",      "regexp_replace",
-  "concat",     "||",        "year",        "month",       "day",
-  "hour",       "minute",    "second",      "millisecond", "microsecond",
-  "date_trunc", "row",       "struct_pack", "error",       "constant_or_null",
-  "upper",      "lower",     "round",       "abs"};
+constexpr std::array<std::string_view, 48> kReverseTable = {
+  "+",
+  "-",
+  "*",
+  "/",
+  "//",
+  "%",
+  "substring",
+  "~~",
+  "!~~",
+  "contains",
+  "prefix",
+  "suffix",
+  "strlen",
+  "length",
+  "regexp_replace",
+  "concat",
+  "||",
+  "year",
+  "month",
+  "day",
+  "hour",
+  "minute",
+  "second",
+  "millisecond",
+  "microsecond",
+  "date_trunc",
+  "row",
+  "struct_pack",
+  "error",
+  "constant_or_null",
+  "upper",
+  "lower",
+  "round",
+  "abs",
+  "__sirius_mo_decimal_add",
+  "__sirius_mo_decimal_subtract",
+  "__sirius_mo_decimal_multiply",
+  "__sirius_mo_decimal_divide",
+  "__sirius_mo_decimal_integer_divide",
+  "__sirius_mo_decimal_modulo",
+  "__sirius_mo_decimal_negate",
+  "__sirius_mo_decimal_cast",
+  "__sirius_mo_decimal_equal",
+  "__sirius_mo_decimal_not_equal",
+  "__sirius_mo_decimal_less",
+  "__sirius_mo_decimal_less_equal",
+  "__sirius_mo_decimal_greater",
+  "__sirius_mo_decimal_greater_equal",
+};
 
 static_assert(static_cast<std::size_t>(function_id::abs) + 1 == 34,
-              "function_id::abs must be the last entry; cardinality locked at 34.");
-static_assert(kReverseTable.size() == 34,
+              "Ordinary function IDs must retain their original ABI values.");
+static_assert(kReverseTable.size() == 48,
               "kReverseTable must have one slot per function_id value.");
-static_assert(kForwardTable.size() == 40,
+static_assert(kForwardTable.size() == 54,
               "kForwardTable includes SQL and Substrait aliases for supported function ids.");
 
 // Walks both tables to ensure every enum value has exactly one canonical

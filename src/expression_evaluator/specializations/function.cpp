@@ -15,6 +15,8 @@
  */
 
 // sirius
+#include "numeric/decimal_functions.hpp"
+
 #include <config.hpp>
 #include <expression/ast/node.hpp>
 #include <expression/date_trunc_unit.hpp>
@@ -91,6 +93,7 @@ like_multiliteral_cache::entry_ptr const& expression_evaluator::get_or_classify_
 evaluate_result expression_evaluator::evaluate(sirius::ast::function_call const& alt,
                                                evaluation_mode mode)
 {
+  if (mo_decimal::is_decimal_function(alt.function())) return evaluate_decimal_function(alt, mode);
   auto const resolved_id = alt.function();
   auto const& args       = alt.arguments();
 

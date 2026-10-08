@@ -20,6 +20,8 @@
 #define CUDF_VERSION_NUM (CUDF_VERSION_MAJOR * 100 + CUDF_VERSION_MINOR)
 
 #include "helper/logical_type.hpp"
+#include "numeric/exact_decimal_gpu.hpp"
+#include "sirius/exception.hpp"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
@@ -212,6 +214,13 @@ inline std::size_t estimate_referenced_column_bytes(
  */
 [[nodiscard]] inline std::optional<cudf::data_type> get_cudf_type(const logical_type& t)
 {
+  if (t.is_mo_decimal()) {
+    auto type = t.mo_decimal_type();
+    return type.bits == 256 ? cudf::data_type{cudf::type_id::STRUCT}
+                            : cudf::data_type{type.bits == 64 ? cudf::type_id::DECIMAL64
+                                                              : cudf::type_id::DECIMAL128,
+                                              -static_cast<int32_t>(type.scale)};
+  }
   switch (t.id()) {
     case type_id::TINYINT: return cudf::data_type(cudf::type_id::INT8);
     case type_id::SMALLINT: return cudf::data_type(cudf::type_id::INT16);
@@ -340,11 +349,19 @@ template <typename... Columns>
  * types). Used wherever an empty but schema-bearing table is needed — e.g. an all-pruned GPU-values
  * source, or the synthesized missing side of a join against an empty table.
  */
-inline std::unique_ptr<cudf::table> make_empty_table(const duckdb::vector<logical_type>& types)
+inline std::unique_ptr<cudf::table> make_empty_table(
+  const duckdb::vector<logical_type>& types,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref())
 {
   std::vector<std::unique_ptr<cudf::column>> columns;
   columns.reserve(types.size());
   for (auto const& t : types) {
+    if (t.is_mo_decimal()) {
+      columns.push_back(mo_decimal::make_decimal_column(
+        t.mo_decimal_type(), 0, cudf::mask_state::UNALLOCATED, stream, mr));
+      continue;
+    }
     columns.push_back(t.is_array()
                         ? cudf::make_empty_lists_column(require_cudf_type(t.array_child()))
                         : cudf::make_empty_column(require_cudf_type(t)));

@@ -251,6 +251,15 @@ def main():
     manifest["artifact_sha256"][str((args.output / "sirius_c.h").resolve())] = sha256(
         args.output / "sirius_c.h"
     )
+    # The versioned literal schema is owned by Sirius, so downstream language
+    # bindings generate from the same pinned SDK contract instead of duplicating it.
+    relative_schema = Path("proto/matrixone/sirius/numeric/v1/exact_decimal.proto")
+    schema = Path(manifest["source_directory"]) / relative_schema
+    if schema.is_file():
+        destination = args.output / relative_schema
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(schema, destination)
+        manifest["artifact_sha256"][str(destination.resolve())] = sha256(destination)
     (args.output / "link.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # Reusing a build tree must not leave the retired GPU-provider manifest
     # beside a newly exported SDK that no longer records or validates it.
