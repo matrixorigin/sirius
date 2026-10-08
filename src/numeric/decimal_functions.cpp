@@ -3,6 +3,7 @@
 
 #include "expression/ast/node.hpp"
 #include "helper/type_conversions.hpp"
+#include "numeric/decimal_plan.hpp"
 #include "numeric/exact_decimal.hpp"
 
 #include <duckdb/catalog/catalog.hpp>
@@ -142,6 +143,7 @@ duckdb::unique_ptr<duckdb::FunctionData> bind_scalar(
   std::vector<logical_type> inputs;
   duckdb::vector<duckdb::LogicalType> carriers;
   for (std::size_t i = 0; i + 1 < arguments.size(); ++i) {
+    restore_exact_bound_types(arguments[i]);
     inputs.push_back(sirius::from_duckdb(arguments[i]->return_type));
     carriers.push_back(arguments[i]->return_type);
   }

@@ -22,6 +22,11 @@ expression_evaluator::evaluate_result expression_evaluator::evaluate_decimal_fun
     types.push_back(argument->return_type());
   }
   validate_signature(op, types, expression.return_type());
+  if (op == decimal_op::cast && types[0].is_mo_decimal()) {
+    auto a = types[0].mo_decimal_type(), b = expression.return_type().mo_decimal_type();
+    if (a.bits == b.bits && a.precision == b.precision && a.scale == b.scale)
+      return evaluate(*arguments[0], mode);
+  }
   struct owners {
     std::vector<evaluate_result> arguments;
     std::vector<std::unique_ptr<cudf::column>> lifted;

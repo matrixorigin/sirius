@@ -179,6 +179,7 @@ class sirius_physical_partition : public sirius_physical_operator {
   /// cast the key column to this type before hashing.  Used to align hash values when the
   /// two join sides have different physical column types for the same logical key.
   std::vector<cudf::data_type> _partition_key_cast_types;
+  std::vector<mo_decimal::decimal_type> _partition_exact_types;
   std::optional<int> _num_partitions;
   bool _is_build;
   bool _drives_partition_count{false};

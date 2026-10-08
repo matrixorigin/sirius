@@ -2,13 +2,16 @@
 #pragma once
 #include "expression/ast/from_duckdb.hpp"
 #include "from_substrait.hpp"
+#include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
 #include "numeric/decimal_import.hpp"
 #include "numeric/exact_decimal.hpp"
 
 #include <core_functions_extension.hpp>
 #include <duckdb.hpp>
+#include <duckdb/execution/column_binding_resolver.hpp>
 #include <duckdb/parser/statement/relation_statement.hpp>
+#include <duckdb/planner/expression/bound_aggregate_expression.hpp>
 #include <duckdb/planner/expression/bound_function_expression.hpp>
 #include <duckdb/planner/expression_iterator.hpp>
 #include <duckdb/planner/planner.hpp>
@@ -103,6 +106,7 @@ class importer {
   {
     db.LoadStaticExtension<duckdb::CoreFunctionsExtension>();
     sirius::mo_decimal::register_scalar_functions(*db.instance);
+    sirius::mo_decimal::register_aggregate_functions(*db.instance);
   }
   std::unique_ptr<sirius::ast::node> bind(substrait::Plan const& plan)
   {
@@ -114,10 +118,21 @@ class importer {
       auto relation = converter.TransformPlan();
       duckdb::Planner planner(*connection.context);
       planner.CreatePlan(duckdb::make_uniq<duckdb::RelationStatement>(relation));
+      planner.plan->ResolveOperatorTypes();
+      duckdb::ColumnBindingResolver resolver;
+      resolver.VisitOperator(*planner.plan);
       std::unique_ptr<sirius::ast::node> found;
       std::function<void(duckdb::Expression const&)> expression;
       expression = [&](duckdb::Expression const& value) {
         if (found) return;
+        if (value.GetExpressionClass() == duckdb::ExpressionClass::BOUND_AGGREGATE) {
+          auto const& aggregate = value.Cast<duckdb::BoundAggregateExpression>();
+          auto id               = sirius::from_duckdb_aggregate_name(aggregate.function.name);
+          if (id && sirius::mo_decimal::is_decimal_aggregate(*id)) {
+            found = sirius::ast::from_duckdb(value);
+            return;
+          }
+        }
         if (value.GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION) {
           auto const& function = value.Cast<duckdb::BoundFunctionExpression>();
           auto id              = sirius::from_duckdb_function_name(function.function.name);

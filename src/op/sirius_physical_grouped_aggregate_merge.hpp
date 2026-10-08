@@ -59,7 +59,8 @@ class sirius_physical_grouped_aggregate_merge : public sirius_physical_partition
     std::vector<AggregateSlot> aggregate_slots,
     bool has_avg,
     bool has_count_distinct,
-    std::size_t estimated_cardinality);
+    std::size_t estimated_cardinality,
+    std::shared_ptr<mo_decimal::aggregate_layout const> exact_layout = {});
 
   sirius_physical_grouped_aggregate_merge(
     duckdb::vector<sirius::logical_type> types,
@@ -96,6 +97,7 @@ class sirius_physical_grouped_aggregate_merge : public sirius_physical_partition
 
   // Grouped aggregatge definitions for cudf compute
   std::vector<int> group_idx;
+  std::shared_ptr<mo_decimal::aggregate_layout const> exact_layout;
   std::vector<cudf::aggregation::Kind> cudf_aggregates;
   std::vector<int> cudf_aggregate_idx;
   std::vector<std::vector<int>> cudf_aggregate_struct_col_indices;

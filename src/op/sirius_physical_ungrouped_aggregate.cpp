@@ -24,6 +24,7 @@
 #include "expression/ast/reference.hpp"
 #include "expression/ast/utils.hpp"
 #include "helper/type_conversions.hpp"
+#include "numeric/decimal_aggregate_layout.hpp"
 #include "op/merge/gpu_merge_impl.hpp"
 #include "op/sirius_physical_ungrouped_aggregate_merge.hpp"
 #include "sirius/exception.hpp"
@@ -276,6 +277,7 @@ std::unique_ptr<cudf::column> make_avg_column(const cudf::column_view& sum_view,
 duckdb::vector<sirius::logical_type> sirius_physical_ungrouped_aggregate::get_local_output_types()
   const
 {
+  if (auto exact = mo_decimal::make_aggregate_layout({}, aggregates)) return exact->local_types();
   aggregate_layout layout;
   try {
     layout = build_aggregate_layout(aggregates);
@@ -304,6 +306,21 @@ std::unique_ptr<operator_data> sirius_physical_ungrouped_aggregate::execute(
       std::vector<std::shared_ptr<cucascade::data_batch>>{});
   }
 
+  auto exact = mo_decimal::make_aggregate_layout({}, aggregates);
+  if (exact) {
+    std::vector<std::shared_ptr<cucascade::data_batch>> outputs;
+    for (auto const& batch : input_batches) {
+      auto* space = batch.get_memory_space();
+      if (!space) continue;
+      outputs.push_back(make_data_batch(
+        mo_decimal::local_aggregate_table(
+          get_cudf_table_view(batch), *exact, stream, space->get_default_allocator()),
+        *space,
+        stream,
+        batch_telemetry()));
+    }
+    return std::make_unique<pipelineable_operator_data>(std::move(outputs));
+  }
   auto layout = build_aggregate_layout(aggregates);
   std::vector<std::shared_ptr<cucascade::data_batch>> outputs;
   outputs.reserve(input_batches.size());
@@ -497,6 +514,18 @@ std::unique_ptr<operator_data> sirius_physical_ungrouped_aggregate_merge::execut
       std::vector<std::shared_ptr<cucascade::data_batch>>{});
   }
 
+  if (auto exact = mo_decimal::make_aggregate_layout({}, aggregates)) {
+    std::vector<cudf::table_view> tables;
+    for (auto const& batch : input_batches)
+      tables.push_back(get_cudf_table_view(batch));
+    auto result = make_data_batch(
+      mo_decimal::merge_aggregate_tables(tables, *exact, stream, space->get_default_allocator()),
+      *space,
+      stream,
+      batch_telemetry());
+    return std::make_unique<pipelineable_operator_data>(
+      std::vector<std::shared_ptr<cucascade::data_batch>>{std::move(result)});
+  }
   auto layout = build_aggregate_layout(aggregates);
   std::shared_ptr<cucascade::data_batch> merged_batch;
   if (input_batches.size() == 1) {

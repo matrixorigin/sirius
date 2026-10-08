@@ -173,7 +173,7 @@ TEST_CASE("MO imported scalar signatures execute on the GPU without coercion",
         CHECK(decimal_column_matches(result->view().column(0), output));
     }
   }
-  CHECK((sirius_capabilities() & 16u) == 0);
+  CHECK((sirius_capabilities() & SIRIUS_CAP_MO_EXACT_DECIMAL_V1) != 0);
 }
 
 TEST_CASE("MO imported literals preserve distinct high limbs and signs", "[decimal_import_gpu]")

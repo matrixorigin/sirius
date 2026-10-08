@@ -70,7 +70,7 @@ extern "C" uint32_t sirius_abi_version(void) { return SIRIUS_ABI_VERSION; }
 extern "C" uint64_t sirius_capabilities(void)
 {
   return SIRIUS_CAP_ENGINE_CONTROL | SIRIUS_CAP_MO_INPUT | SIRIUS_CAP_TAE_INPUT |
-         SIRIUS_CAP_NATIVE_RESULTS;
+         SIRIUS_CAP_NATIVE_RESULTS | SIRIUS_CAP_MO_EXACT_DECIMAL_V1;
 }
 
 extern "C" sirius_status sirius_engine_create(const sirius_engine_options* options,

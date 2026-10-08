@@ -1,5 +1,8 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "embedding/result_codec.hpp"
+#include "numeric/exact_decimal_gpu.hpp"
+
+#include <cudf/null_mask.hpp>
 
 #include <rmm/cuda_stream.hpp>
 #include <rmm/device_buffer.hpp>
@@ -140,4 +143,40 @@ TEST_CASE("native result codec keeps decimal integer bits and unsigned high bits
   CHECK(read<uint64_t>(*batch, batch->columns[1].data_offset) == UINT64_MAX);
   CHECK(read<uint64_t>(*batch, batch->columns[1].data_offset + 8) == unsigned_values[1]);
   result->cancel();
+}
+TEST_CASE("wide result codec validates child NULLs against parent before publication",
+          "[native_result_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto mr = cudf::get_current_device_resource_ref();
+  for (bool parent_null : {false, true}) {
+    auto column =
+      sirius::mo_decimal::make_decimal_literal({256, 65, 2}, {}, !parent_null, 2, stream, mr);
+    auto contents = column->release();
+    contents.children[0]->set_null_mask(
+      cudf::create_null_mask(2, cudf::mask_state::ALL_NULL, stream, mr), 2);
+    column = std::make_unique<cudf::column>(
+      cudf::data_type{cudf::type_id::STRUCT},
+      2,
+      rmm::device_buffer{},
+      contents.null_mask ? std::move(*contents.null_mask) : rmm::device_buffer{},
+      parent_null ? 2 : 0,
+      std::move(contents.children));
+    stream.synchronize();
+    cudf::table_view table{{column->view()}};
+    std::vector<owned_column> schema{{34, 65, 2, true, "wide"}};
+    auto result = std::make_shared<native_result>();
+    result->activate(std::make_shared<codec_pool>());
+    std::shared_ptr<result_batch> scratch, batch;
+    REQUIRE(result->try_allocate(64u << 10, 0, scratch) == SIRIUS_OK);
+    auto layout = size_native_result(table, 0, schema, *scratch, stream, 4096);
+    REQUIRE(result->try_allocate(layout.bytes, 2, batch) == SIRIUS_OK);
+    if (parent_null) {
+      REQUIRE_NOTHROW(encode_native_result(table, 0, schema, layout, *batch, *scratch, stream));
+      CHECK(read<uint64_t>(*batch, batch->columns[0].null_offset) == 3);
+    } else
+      REQUIRE_THROWS_AS(encode_native_result(table, 0, schema, layout, *batch, *scratch, stream),
+                        failure);
+    result->cancel();
+  }
 }

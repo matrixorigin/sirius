@@ -116,18 +116,20 @@ typedef struct sirius_result_stats {
 
 typedef uint32_t sirius_status;
 enum {
-  SIRIUS_OK                 = 0,
-  SIRIUS_UNSUPPORTED        = 1,
-  SIRIUS_INVALID_ARGUMENT   = 2,
-  SIRIUS_INVALID_STATE      = 3,
-  SIRIUS_RESOURCE_EXHAUSTED = 4,
-  SIRIUS_CANCELLED          = 5,
-  SIRIUS_TIMEOUT            = 6,
-  SIRIUS_GPU_UNAVAILABLE    = 7,
-  SIRIUS_EOF                = 8,
-  SIRIUS_NOT_NEEDED         = 9,
-  SIRIUS_EXECUTION_FAILED   = 10,
-  SIRIUS_BUSY               = 11
+  SIRIUS_OK                    = 0,
+  SIRIUS_UNSUPPORTED           = 1,
+  SIRIUS_INVALID_ARGUMENT      = 2,
+  SIRIUS_INVALID_STATE         = 3,
+  SIRIUS_RESOURCE_EXHAUSTED    = 4,
+  SIRIUS_CANCELLED             = 5,
+  SIRIUS_TIMEOUT               = 6,
+  SIRIUS_GPU_UNAVAILABLE       = 7,
+  SIRIUS_EOF                   = 8,
+  SIRIUS_NOT_NEEDED            = 9,
+  SIRIUS_EXECUTION_FAILED      = 10,
+  SIRIUS_BUSY                  = 11,
+  SIRIUS_NUMERIC_OUT_OF_RANGE  = 12,
+  SIRIUS_NUMERIC_INVALID_INPUT = 13
 };
 
 enum { SIRIUS_QUERY_SOURCE_MO = 1u, SIRIUS_QUERY_SOURCE_TAE = 2u };
@@ -158,10 +160,11 @@ typedef struct sirius_query_execution_stats {
 } sirius_query_execution_stats;
 
 enum {
-  SIRIUS_CAP_ENGINE_CONTROL = 1u,
-  SIRIUS_CAP_MO_INPUT       = 2u,
-  SIRIUS_CAP_TAE_INPUT      = 4u,
-  SIRIUS_CAP_NATIVE_RESULTS = 8u
+  SIRIUS_CAP_ENGINE_CONTROL      = 1u,
+  SIRIUS_CAP_MO_INPUT            = 2u,
+  SIRIUS_CAP_TAE_INPUT           = 4u,
+  SIRIUS_CAP_NATIVE_RESULTS      = 8u,
+  SIRIUS_CAP_MO_EXACT_DECIMAL_V1 = 16u
 };
 
 typedef struct sirius_error {

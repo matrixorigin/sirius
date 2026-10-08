@@ -15,6 +15,7 @@
  */
 
 // sirius
+#include "numeric/decimal_aggregate_gpu.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
 #include <cudf/cudf_utils.hpp>
@@ -319,6 +320,9 @@ std::unique_ptr<cudf::table> expression_evaluator::evaluate(cudf::table_view inp
         } else {
           result_column = result.release_column();
         }
+        if (expr.return_type().is_mo_decimal())
+          result_column = mo_decimal::restore_decimal_validity(
+            std::move(result_column), expr.return_type().mo_decimal_type(), _stream, _mr);
         if (expr.return_type().is_mo_decimal() &&
             !mo_decimal::decimal_column_matches(result_column->view(),
                                                 expr.return_type().mo_decimal_type()))
@@ -339,6 +343,9 @@ std::unique_ptr<cudf::table> expression_evaluator::evaluate(cudf::table_view inp
         }
         _output_columns.push_back(std::move(result_column));
       }
+      if (expr.return_type().is_mo_decimal())
+        _output_columns.back() = mo_decimal::restore_decimal_validity(
+          std::move(_output_columns.back()), expr.return_type().mo_decimal_type(), _stream, _mr);
     };
 
     // Iterate _ast_expressions and route through the std::visit dispatcher, then

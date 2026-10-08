@@ -15,6 +15,8 @@
  */
 
 // sirius
+#include "numeric/decimal_aggregate_gpu.hpp"
+
 #include <cudf/cudf_utils.hpp>
 
 #include <expression/ast/node.hpp>
@@ -76,7 +78,9 @@ evaluate_result expression_evaluator::evaluate(sirius::ast::reference const& alt
   if (logical.is_mo_decimal() &&
       alt.column_index >= static_cast<uint32_t>(_input_table.num_columns()))
     throw std::invalid_argument("MO exact-decimal reference is outside its input schema");
-  auto const source = _input_table.column(alt.column_index);
+  auto source = _input_table.column(alt.column_index);
+  if (logical.is_mo_decimal())
+    source = mo_decimal::canonical_decimal_view(source, logical.mo_decimal_type(), _stream, _mr);
   if (logical.is_mo_decimal() &&
       !mo_decimal::decimal_column_matches(source, logical.mo_decimal_type()))
     throw std::invalid_argument("MO exact-decimal reference carrier does not match its descriptor");

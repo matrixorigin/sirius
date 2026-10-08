@@ -18,6 +18,7 @@
 #include "cudf/cudf_utils.hpp"
 #include "data/data_batch_utils.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "numeric/decimal_aggregate_layout.hpp"
 #include "op/aggregate/aggregate_op_util.hpp"
 #include "op/merge/gpu_merge_impl.hpp"
 #include "pipeline/sirius_meta_pipeline.hpp"
@@ -75,7 +76,8 @@ sirius_physical_grouped_aggregate_merge::sirius_physical_grouped_aggregate_merge
                                             grouped_aggregate->aggregate_slots,
                                             grouped_aggregate->has_avg,
                                             grouped_aggregate->has_count_distinct,
-                                            grouped_aggregate->estimated_cardinality)
+                                            grouped_aggregate->estimated_cardinality,
+                                            grouped_aggregate->exact_layout)
 {
   child_op              = grouped_aggregate;
   _hash_partition_bytes = hash_partition_bytes;
@@ -90,10 +92,12 @@ sirius_physical_grouped_aggregate_merge::sirius_physical_grouped_aggregate_merge
   std::vector<AggregateSlot> aggregate_slots,
   bool has_avg,
   bool has_count_distinct,
-  std::size_t estimated_cardinality)
+  std::size_t estimated_cardinality,
+  std::shared_ptr<mo_decimal::aggregate_layout const> exact_layout)
   : sirius_physical_partition_consumer_operator(
       SiriusPhysicalOperatorType::MERGE_GROUP_BY, std::move(types), estimated_cardinality),
     group_idx(std::move(group_idx)),
+    exact_layout(std::move(exact_layout)),
     cudf_aggregates(std::move(cudf_aggregates)),
     cudf_aggregate_idx(std::move(cudf_aggregate_idx)),
     cudf_aggregate_struct_col_indices(std::move(cudf_aggregate_struct_col_indices)),
@@ -142,6 +146,7 @@ sirius_physical_grouped_aggregate_merge::sirius_physical_grouped_aggregate_merge
   // Convert input parameters to cudf compute definitions BEFORE moving them
   auto cudf_defs                    = convert_duckdb_aggregates_to_cudf(groups_p, expressions);
   group_idx                         = std::move(cudf_defs.group_idx);
+  exact_layout                      = std::move(cudf_defs.exact_layout);
   cudf_aggregates                   = std::move(cudf_defs.cudf_aggregates);
   cudf_aggregate_idx                = std::move(cudf_defs.cudf_aggregate_idx);
   cudf_aggregate_struct_col_indices = std::move(cudf_defs.cudf_aggregate_struct_col_indices);
@@ -207,6 +212,19 @@ std::unique_ptr<operator_data> sirius_physical_grouped_aggregate_merge::execute(
   if (input_batches.size() == 0) {
     throw std::runtime_error(
       "We expect at least one input batch for grouped aggregate merge operator");
+  }
+  if (exact_layout) {
+    auto* space = input_batches[0].get_memory_space();
+    std::vector<cudf::table_view> tables;
+    for (auto const& batch : input_batches)
+      tables.push_back(get_cudf_table_view(batch));
+    auto result = make_data_batch(mo_decimal::merge_aggregate_tables(
+                                    tables, *exact_layout, stream, space->get_default_allocator()),
+                                  *space,
+                                  stream,
+                                  batch_telemetry());
+    return std::make_unique<pipelineable_operator_data>(
+      std::vector<std::shared_ptr<cucascade::data_batch>>{std::move(result)});
   }
 
   // Fast path: single batch with no post-processing needed

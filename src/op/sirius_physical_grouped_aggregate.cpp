@@ -18,6 +18,7 @@
 
 #include "config.hpp"
 #include "data/data_batch_utils.hpp"
+#include "numeric/decimal_aggregate_layout.hpp"
 #include "op/aggregate/aggregate_op_util.hpp"
 #include "op/aggregate/gpu_aggregate_impl.hpp"
 #include "telemetry/nvtx.hpp"
@@ -63,6 +64,7 @@ sirius_physical_grouped_aggregate::sirius_physical_grouped_aggregate(
 {
   auto cudf_defs                    = convert_duckdb_aggregates_to_cudf(groups_p, expressions);
   group_idx                         = std::move(cudf_defs.group_idx);
+  exact_layout                      = std::move(cudf_defs.exact_layout);
   cudf_aggregates                   = std::move(cudf_defs.cudf_aggregates);
   cudf_aggregate_idx                = std::move(cudf_defs.cudf_aggregate_idx);
   cudf_aggregate_struct_col_indices = std::move(cudf_defs.cudf_aggregate_struct_col_indices);
@@ -88,6 +90,11 @@ sirius_physical_grouped_aggregate::get_count_distinct_local_output_types() const
   }
   return local_types;
 }
+duckdb::vector<sirius::logical_type> sirius_physical_grouped_aggregate::get_local_output_types()
+  const
+{
+  return exact_layout ? exact_layout->local_types() : types;
+}
 
 std::unique_ptr<operator_data> sirius_physical_grouped_aggregate::execute(
   const operator_data& input_data, ::cuda::stream_ref stream)
@@ -99,6 +106,15 @@ std::unique_ptr<operator_data> sirius_physical_grouped_aggregate::execute(
   for (auto const& input_batch : input_batches) {
     auto* space = input_batch.get_memory_space();
     if (!space) { continue; }
+    if (exact_layout) {
+      results.push_back(make_data_batch(
+        mo_decimal::local_aggregate_table(
+          get_cudf_table_view(input_batch), *exact_layout, stream, space->get_default_allocator()),
+        *space,
+        stream,
+        batch_telemetry()));
+      continue;
+    }
     auto result = gpu_aggregate_impl::local_grouped_aggregate(input_batch,
                                                               group_idx,
                                                               cudf_aggregates,

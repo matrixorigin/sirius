@@ -44,6 +44,7 @@
 #include "helper/numeric_narrowing.hpp"
 #include "helper/type_conversions.hpp"
 #include "log/logging.hpp"
+#include "numeric/decimal_aggregate_gpu.hpp"
 #include "op/dynamic_filter/dynamic_filter_publisher.hpp"
 #include "op/dynamic_filter/sirius_dynamic_filter.hpp"
 #include "op/sirius_physical_concat.hpp"
@@ -476,6 +477,15 @@ sirius_physical_hash_join::sirius_physical_hash_join(
 
     // Extract left key index (may be BOUND_REF or BOUND_CAST wrapping a BOUND_REF)
     key_cast_info cast_info;
+    if (condition.left->return_type().is_mo_decimal() ||
+        condition.right->return_type().is_mo_decimal()) {
+      if (!condition.left->return_type().is_mo_decimal() ||
+          !condition.right->return_type().is_mo_decimal())
+        throw std::invalid_argument("MO decimal join key requires two exact operands");
+      cast_info.left_exact  = condition.left->return_type().mo_decimal_type();
+      cast_info.right_exact = condition.right->return_type().mo_decimal_type();
+      cast_necessary        = true;
+    }
     auto left_class  = left_expr->GetExpressionClass();
     auto right_class = right_expr->GetExpressionClass();
 
@@ -1460,6 +1470,8 @@ static join_side_keys_result prepare_join_keys(
   ::cuda::stream_ref stream)
 {
   join_side_keys_result result;
+  result.owned_cast_columns.reserve(key_col_indices.size());
+  result.key_views.reserve(key_col_indices.size());
 
   cudf::table_view table = get_cudf_table_view(input_batch);
 
@@ -1497,7 +1509,13 @@ static join_side_keys_result prepare_join_keys(
     cudf::data_type target_type =
       is_left_side ? cast_info.left_target_type : cast_info.right_target_type;
 
-    if (needs_cast) {
+    auto exact = is_left_side ? cast_info.left_exact : cast_info.right_exact;
+    if (exact.bits) {
+      auto key = mo_decimal::make_equality_key(
+        col, exact, stream, input_batch.get_memory_space()->get_default_allocator());
+      result.key_views.push_back(key->view());
+      result.owned_cast_columns.push_back(std::move(key));
+    } else if (needs_cast) {
       auto cast_col = sirius::cast_through_rep(col, target_type, stream);
       result.key_views.push_back(cast_col->view());
       result.owned_cast_columns.push_back(std::move(cast_col));

@@ -7,6 +7,7 @@
 #include "embedding/input.hpp"
 #include "embedding/result.hpp"
 #include "embedding/tae_demand.hpp"
+#include "numeric/decimal_error.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
 #include <algorithm>
@@ -45,6 +46,10 @@ sirius_error current_error() noexcept
     return error(e.deadline_expired ? SIRIUS_TIMEOUT : SIRIUS_CANCELLED, e.what());
   } catch (pipeline::gpu_stream_quiescence_error const& e) {
     return error(SIRIUS_GPU_UNAVAILABLE, e.what());
+  } catch (mo_decimal::numeric_error const& e) {
+    return error(e.code() == mo_decimal::decimal_error::out_of_range ? SIRIUS_NUMERIC_OUT_OF_RANGE
+                                                                     : SIRIUS_NUMERIC_INVALID_INPUT,
+                 e.what());
   } catch (std::bad_alloc const&) {
     return error(SIRIUS_RESOURCE_EXHAUSTED, "native allocation failed");
   } catch (std::exception const& e) {
@@ -532,7 +537,9 @@ void engine_control::process(engine_backend& backend,
   } else {
     driver.reset();
     auto producer_error = q->inputs->outcome();
-    if (producer_error.code) result = producer_error;
+    if (producer_error.code && result.code != SIRIUS_NUMERIC_OUT_OF_RANGE &&
+        result.code != SIRIUS_NUMERIC_INVALID_INPUT)
+      result = producer_error;
     q->inputs->stop();
     q->inputs->discard();
   }

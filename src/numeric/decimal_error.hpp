@@ -8,7 +8,7 @@ class numeric_error final : public std::runtime_error {
  public:
   explicit numeric_error(decimal_error code)
     : std::runtime_error(code == decimal_error::invalid_input
-                           ? "MO exact-decimal checked cast failed"
+                           ? "MO exact-decimal checked numeric operation failed"
                            : "MO exact-decimal arithmetic is out of range"),
       code_(code)
   {

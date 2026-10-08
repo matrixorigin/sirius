@@ -142,6 +142,9 @@ void sirius_physical_partition::get_partition_keys_and_type(sirius_physical_oper
         // keys would land in different partitions. We apply the same cast used by the join
         // condition so both sides hash identically.
         const auto& key_expr = is_build ? *right_owned : *left_owned;
+        auto logical = is_build ? condition.right->return_type() : condition.left->return_type();
+        _partition_exact_types.push_back(logical.is_mo_decimal() ? logical.mo_decimal_type()
+                                                                 : mo_decimal::decimal_type{});
         if (is_build) {
           _partition_keys.push_back(right_index.value());
         } else {
@@ -298,7 +301,8 @@ std::unique_ptr<operator_data> sirius_physical_partition::execute(const operator
                                                                _num_partitions.value(),
                                                                stream,
                                                                *space,
-                                                               batch_telemetry());
+                                                               batch_telemetry(),
+                                                               _partition_exact_types);
       break;
     case PartitionType::RANGE:
       throw std::runtime_error("Range partitioning is not implemented yet");

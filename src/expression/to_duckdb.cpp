@@ -16,6 +16,7 @@
 
 #include "expression/ast/to_duckdb.hpp"
 
+#include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
 
 // sirius
@@ -261,8 +262,16 @@ std::unique_ptr<duckdb::Expression> to_duckdb(function_call const& alt)
                                                        /*bind_info=*/nullptr));
 }
 
-std::unique_ptr<duckdb::Expression> to_duckdb(aggregate const& /*alt*/)
+std::unique_ptr<duckdb::Expression> to_duckdb(aggregate const& alt)
 {
+  if (mo_decimal::is_decimal_aggregate(alt.function())) {
+    if (alt.distinct()) throw std::invalid_argument("MO aggregate DISTINCT is unsupported");
+    duckdb::vector<duckdb::unique_ptr<duckdb::Expression>> children;
+    for (auto const& child : alt.arguments())
+      children.push_back(to_duck_ptr(to_duckdb(*child)));
+    return from_duck_ptr(mo_decimal::bound_aggregate(
+      mo_decimal::aggregate_operation(alt.function()), std::move(children), alt.return_type()));
+  }
   throw not_implemented_exception(
     "[sirius::ast::to_duckdb] aggregate reconstruction is not implemented; consumers read the "
     "aggregate node natively (#863).");
