@@ -1,6 +1,7 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "embedding/result_codec.hpp"
 
+#include "numeric/exact_decimal_gpu.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
 #include <cudf/strings/strings_column_view.hpp>
@@ -72,6 +73,7 @@ cudf::data_type expected(owned_column const& c)
     case 31: return cudf::data_type{id::FLOAT64};
     case 32: return cudf::data_type{id::DECIMAL64, -c.scale};
     case 33: return cudf::data_type{id::DECIMAL128, -c.scale};
+    case 34: return cudf::data_type{id::STRUCT};
     case 50: return cudf::data_type{id::TIMESTAMP_DAYS};
     case 52: return cudf::data_type{id::TIMESTAMP_MICROSECONDS};
     default: return cudf::data_type{id::STRING};
@@ -115,7 +117,11 @@ result_slice_layout size_native_result(cudf::table_view table,
   if (table.num_columns() != static_cast<cudf::size_type>(schema.size()))
     throw failure(SIRIUS_EXECUTION_FAILED, "native result column count mismatch");
   for (std::size_t c = 0; c < schema.size(); ++c)
-    if (table.column(c).type() != expected(schema[c]))
+    if (table.column(c).type() != expected(schema[c]) ||
+        (schema[c].oid == 34 &&
+         !mo_decimal::decimal_column_matches(
+           table.column(c),
+           {256, static_cast<uint8_t>(schema[c].width), static_cast<uint8_t>(schema[c].scale)})))
       throw failure(SIRIUS_UNSUPPORTED, "native result physical type does not match MO contract");
   auto size = [&](uint32_t rows) {
     std::size_t position{};
@@ -151,7 +157,39 @@ void encode_native_result(cudf::table_view table,
     auto& vector = output.columns[c];
     vector       = column_layout(col, schema[c], begin, layout.rows, position, scratch, stream);
     auto width   = input_element_size(schema[c].oid);
-    if (!input_string_type(schema[c].oid)) {
+    if (schema[c].oid == 34) {
+      // Reuse the admitted scratch slab; never allocate a second complete
+      // result while interleaving the four fixed-width device children.
+      if (scratch.storage->size() < 32)
+        throw failure(SIRIUS_RESOURCE_EXHAUSTED, "wide result scratch too small");
+      auto chunk = std::min<std::size_t>(1024, scratch.storage->size() / 32);
+      for (uint32_t first = 0; first < layout.rows; first += chunk) {
+        auto count = std::min<std::size_t>(chunk, layout.rows - first);
+        for (int limb = 0; limb < 4; ++limb) {
+          auto child = col.child(3 - limb);
+          download(*scratch.storage,
+                   limb * count * 8,
+                   child.head<uint64_t>() + child.offset() + col.offset() + begin + first,
+                   count * 8,
+                   stream);
+        }
+        auto destination = vector.data_offset + first * 32ULL;
+        // Visit output blocks once per chunk. A per-row write would rescan
+        // every output block for each coefficient in a large result slice.
+        output.storage->visit([&](std::size_t base, std::span<std::byte> block) {
+          auto low  = std::max<std::size_t>(base, destination);
+          auto high = std::min<std::size_t>(base + block.size(), destination + count * 32);
+          for (auto offset = low; offset < high;) {
+            auto relative = offset - destination;
+            auto row = relative / 32, limb = relative % 32 / 8, byte = relative % 8;
+            auto length = std::min<std::size_t>(8 - byte, high - offset);
+            scratch.storage->read(limb * count * 8 + row * 8 + byte,
+                                  block.subspan(offset - base, length));
+            offset += length;
+          }
+        });
+      }
+    } else if (!input_string_type(schema[c].oid)) {
       download(*output.storage,
                vector.data_offset,
                col.head<uint8_t>() + (static_cast<std::size_t>(col.offset()) + begin) * width,

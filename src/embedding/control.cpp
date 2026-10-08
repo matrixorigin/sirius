@@ -126,6 +126,8 @@ owned_column copy_column(sirius_column const& c, std::size_t& bytes)
   if (c.reserved || c.nullable > 1) throw failure(SIRIUS_INVALID_ARGUMENT, "invalid column");
   sirius_input_column scalar{c.oid, c.width, c.scale, c.nullable};
   validate_input_schema({&scalar, 1});
+  if (c.oid == 34 && c.width > 65)
+    throw failure(SIRIUS_INVALID_ARGUMENT, "public decimal result precision exceeds 65");
   owned_column out{c.oid,
                    c.width,
                    c.scale,

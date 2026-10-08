@@ -3,6 +3,7 @@
  */
 #include "embedding/buffer_budget.hpp"
 #include "embedding/control.hpp"
+#include "embedding/input.hpp"
 #include "pipeline/completion_handler.hpp"
 
 #include <catch.hpp>
@@ -213,6 +214,29 @@ TEST_CASE("native query identity is an owned opaque byte string", "[native_contr
 
   REQUIRE(q->contract->query_id.size() == expected.size());
   CHECK(q->contract->query_id == expected);
+}
+
+TEST_CASE("native Decimal256 public and working precision have separate bounds", "[native_control]")
+{
+  fixture f;
+  auto q  = f.create();
+  char id = 'q';
+  sirius_column output{34, 76, 2, 1, "wide", 4, 0};
+  sirius_query_contract contract{
+    sizeof(contract), SIRIUS_ABI_VERSION, 0, 0, &id, 1, {0}, &output, 1};
+  REQUIRE_THROWS_AS(f.control.bind_query(q, contract), failure);
+  CHECK_FALSE(q->contract);
+  output.width = 65;
+  REQUIRE_NOTHROW(f.control.bind_query(q, contract));
+  CHECK(q->contract->outputs[0].oid == 34);
+  CHECK(q->contract->outputs[0].width == 65);
+  sirius_input_column working{34, 76, 76, 1};
+  REQUIRE_NOTHROW(validate_input_schema({&working, 1}));
+  working.width = 77;
+  REQUIRE_THROWS_AS(validate_input_schema({&working, 1}), failure);
+  working = {34, 15, 2, 0};
+  REQUIRE_NOTHROW(validate_input_schema({&working, 1}));
+  CHECK(input_element_size(34) == 32);
 }
 
 TEST_CASE("native query identity retains its nonempty bounded contract", "[native_control]")

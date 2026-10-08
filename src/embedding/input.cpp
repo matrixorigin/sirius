@@ -63,6 +63,7 @@ std::size_t input_element_size(uint32_t oid)
     case 32:
     case 52: return 8;
     case 33: return 16;
+    case 34: return 32;
     default:
       if (input_string_type(oid)) return 24;
   }
@@ -74,10 +75,13 @@ void validate_input_schema(std::span<const sirius_input_column> columns)
   for (auto const& c : columns) {
     (void)input_element_size(c.oid);
     require(c.nullable <= 1, "invalid native column nullability");
-    if (c.oid == 32 || c.oid == 33)
-      require(
-        c.width >= 1 && c.width <= (c.oid == 32 ? 18 : 38) && c.scale >= 0 && c.scale <= c.width,
-        "invalid native decimal precision or scale");
+    if (c.oid == 32 || c.oid == 33 || c.oid == 34)
+      require(c.width >= 1 &&
+                c.width <= (c.oid == 32   ? 18
+                            : c.oid == 33 ? 38
+                                          : 76) &&
+                c.scale >= 0 && c.scale <= c.width,
+              "invalid native decimal precision or scale");
   }
 }
 input_batch::~input_batch()
