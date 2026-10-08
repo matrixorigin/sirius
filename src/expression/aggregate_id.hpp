@@ -44,6 +44,10 @@ enum class aggregate_id : uint16_t {
   avg,
   first,
   stddev_samp,
+  mo_decimal_sum,
+  mo_decimal_avg,
+  mo_decimal_min,
+  mo_decimal_max,
 };
 
 /**

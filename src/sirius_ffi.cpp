@@ -49,6 +49,12 @@
 #include "log/logging.hpp"                // SIRIUS_LOG_INFO
 #include "parquet_extension.hpp"          // duckdb::ParquetExtension
 #include "planner/unsupported_optimizers.hpp"
+#include "numeric/decimal_aggregate_bind.hpp"
+#include "numeric/decimal_functions.hpp"
+#include "numeric/decimal_import.hpp"
+#include "numeric/decimal_plan.hpp"
+#include "pipeline/gpu_stream_quiescence_error.hpp"
+#include "planner/sirius_physical_plan_generator.hpp"  // sirius::planner::sirius_physical_plan_generator
 #include "sirius/ffi.hpp"
 #include "sirius_config.hpp"   // sirius::sirius_config
 #include "sirius_context.hpp"  // duckdb::SiriusContext
@@ -116,11 +122,13 @@ double elapsed_ms(std::chrono::steady_clock::time_point since)
 
 // Lower a Substrait plan to a bound+optimized DuckDB LogicalOperator.
 sirius::exec::bound_plan lower_substrait(duckdb::Connection& conn,
-                                         const std::string& substrait_plan)
+                                         const std::string& substrait_plan,
+                                         duckdb::shared_ptr<duckdb::SubstraitExtensionHandler> extensions = {})
 {
   auto& client = *conn.context;
 
-  duckdb::SubstraitToDuckDB transformer(conn.context, substrait_plan, /*json=*/false);
+  duckdb::SubstraitToDuckDB transformer(
+    conn.context, substrait_plan, /*json=*/false, /*acquire_lock=*/true, extensions);
   auto relation = transformer.TransformPlan();
 
   duckdb::Planner planner(client);
@@ -133,11 +141,15 @@ sirius::exec::bound_plan lower_substrait(duckdb::Connection& conn,
   prepared->value_map = std::move(planner.value_map);
 
   auto logical_plan = std::move(planner.plan);
-  if (duckdb::Settings::Get<duckdb::EnableOptimizerSetting>(client)) {
+  if (extensions) mo_decimal::rewrite_exact_comparisons(logical_plan, client);
+  // MO already optimized this logical plan. DuckDB's ordinary comparison
+  // folding/coercion cannot interpret private coefficient carriers or scales.
+  if (duckdb::Settings::Get<duckdb::EnableOptimizerSetting>(client) && !extensions) {
     duckdb::Optimizer optimizer(*planner.binder, client);
     logical_plan = optimizer.Optimize(std::move(logical_plan));
   }
   logical_plan->ResolveOperatorTypes();
+  if (extensions) prepared->types = logical_plan->types;
   duckdb::ColumnBindingResolver resolver;
   duckdb::ColumnBindingResolver verifier(true);
   verifier.VisitOperator(*logical_plan);
@@ -200,6 +212,8 @@ struct Context::Impl {
     db = duckdb::make_uniq<duckdb::DuckDB>(nullptr, &duckdb_config);
     db->LoadStaticExtension<duckdb::CoreFunctionsExtension>();
     db->LoadStaticExtension<duckdb::ParquetExtension>();
+    mo_decimal::register_scalar_functions(*db->instance);
+    mo_decimal::register_aggregate_functions(*db->instance);
     // Cache parquet footers across binds. The Substrait consumer builds the plan through the
     // Relation API, which re-binds the whole subtree at every level, so a read of one file is
     // bound once per operator above it; with the cache off each bind re-parses the footer and
@@ -354,8 +368,16 @@ void EmbeddedPrepared::run(std::stop_token stop, std::chrono::steady_clock::time
 
 namespace {
 std::atomic<uint64_t> embedded_generation{1};
-duckdb::LogicalType embedded_type(sirius::embedding::owned_column const& column)
+duckdb::LogicalType embedded_type(sirius::embedding::owned_column const& column, bool exact = false)
 {
+  if (exact && (column.oid == 32 || column.oid == 33 || column.oid == 34))
+    return mo_decimal::duckdb_type(
+      logical_type::make_mo_decimal({static_cast<uint16_t>(column.oid == 32   ? 64
+                                                           : column.oid == 33 ? 128
+                                                                              : 256),
+                                     static_cast<uint8_t>(column.width),
+                                     static_cast<uint8_t>(column.scale)},
+                                    column.nullable));
   tae::MOType type{};
   type.oid   = static_cast<uint8_t>(column.oid);
   type.width = column.width;
@@ -407,6 +429,9 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
 {
   if (!embedded_runtime_available())
     throw embedding::failure(SIRIUS_GPU_UNAVAILABLE, "native runtime is unavailable");
+  bool exact = mo_decimal::uses_exact_decimal(bytes);
+  auto native_bytes =
+    exact ? mo_decimal::normalize_exact_substrait(bytes, query.metadata_bytes) : bytes;
   impl_->embedded_catalog->clear();
   auto const generation = embedded_generation.fetch_add(1, std::memory_order_relaxed);
   auto const has_tae = std::any_of(query.bindings.begin(), query.bindings.end(), [](auto const& b) {
@@ -430,7 +455,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
       embedding::embedded_binding binding;
       for (auto const& column : read.columns) {
         binding.names.push_back(column.logical.name);
-        binding.types.push_back(embedded_type(column.logical));
+        binding.types.push_back(embedded_type(column.logical, exact));
       }
       const char* function = nullptr;
       if (read.source_kind == SIRIUS_READ_MO) {
@@ -473,14 +498,22 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
       relation->CreateView(view_name, true, true);
       views.push_back(std::move(view_name));
     }
-    auto lowered = lower_substrait(*impl_->conn, rewrite_embedded_reads(bytes, generation));
+    auto rewritten = rewrite_embedded_reads(native_bytes, generation);
+    auto lowered   = lower_substrait(
+      *impl_->conn, rewritten, exact ? mo_decimal::make_import_handler(rewritten) : nullptr);
     if (lowered.prepared->names.size() != query.contract->outputs.size() ||
         lowered.prepared->types.size() != query.contract->outputs.size())
       throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
                                "prepared output schema does not match query contract");
     for (std::size_t i = 0; i < query.contract->outputs.size(); ++i) {
+      auto expected = embedded_type(query.contract->outputs[i], exact);
+      if (exact)
+        if (auto tagged = mo_decimal::from_duckdb_type(lowered.prepared->types[i]);
+            tagged && !tagged->is_mo_decimal())
+          expected = mo_decimal::duckdb_type(
+            sirius::from_duckdb(expected).with_nullability(query.contract->outputs[i].nullable));
       if (lowered.prepared->names[i] != query.contract->outputs[i].name ||
-          lowered.prepared->types[i] != embedded_type(query.contract->outputs[i]))
+          lowered.prepared->types[i] != expected)
         throw embedding::failure(SIRIUS_INVALID_ARGUMENT,
                                  "prepared output schema does not match query contract");
     }

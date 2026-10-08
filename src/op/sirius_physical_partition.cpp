@@ -114,6 +114,7 @@ void sirius_physical_partition::get_partition_keys_and_type(sirius_physical_oper
     for (auto const& key : hash_join_op.prepared_keys()) {
       _partition_keys.push_back(is_build ? key.right_index : key.left_index);
       _partition_key_cast_types.push_back(key.type);
+      _partition_exact_types.push_back(is_build ? key.right_exact : key.left_exact);
     }
   } else if (op->type == SiriusPhysicalOperatorType::NESTED_LOOP_JOIN) {
     // NLJ is the downstream sizing consumer too; it always reports a single partition.
@@ -254,7 +255,8 @@ std::unique_ptr<operator_data> sirius_physical_partition::execute(const operator
                                                                _num_partitions.value(),
                                                                stream,
                                                                *space,
-                                                               batch_telemetry());
+                                                               batch_telemetry(),
+                                                               _partition_exact_types);
       break;
     case PartitionType::RANGE:
       throw std::runtime_error("Range partitioning is not implemented yet");

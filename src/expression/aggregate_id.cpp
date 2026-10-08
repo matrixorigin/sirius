@@ -30,7 +30,7 @@ namespace {
 
 // Forward table: DuckDB aggregate name -> Sirius aggregate id.
 // Linear scan; called once per BoundAggregateExpression at translator entry.
-constexpr std::array<std::pair<std::string_view, aggregate_id>, 9> kForwardTable = {{
+constexpr std::array<std::pair<std::string_view, aggregate_id>, 13> kForwardTable = {{
   {"sum", aggregate_id::sum},
   {"sum_no_overflow", aggregate_id::sum_no_overflow},
   {"count", aggregate_id::count},
@@ -40,11 +40,15 @@ constexpr std::array<std::pair<std::string_view, aggregate_id>, 9> kForwardTable
   {"avg", aggregate_id::avg},
   {"first", aggregate_id::first},
   {"stddev_samp", aggregate_id::stddev_samp},
+  {"__sirius_mo_decimal_sum", aggregate_id::mo_decimal_sum},
+  {"__sirius_mo_decimal_avg", aggregate_id::mo_decimal_avg},
+  {"__sirius_mo_decimal_min", aggregate_id::mo_decimal_min},
+  {"__sirius_mo_decimal_max", aggregate_id::mo_decimal_max},
 }};
 
 // Reverse table: Sirius aggregate id -> canonical DuckDB aggregate name.
 // Indexed directly by enum value; never searched.
-constexpr std::array<std::string_view, 9> kReverseTable = {
+constexpr std::array<std::string_view, 13> kReverseTable = {
   "sum",
   "sum_no_overflow",
   "count",
@@ -54,13 +58,17 @@ constexpr std::array<std::string_view, 9> kReverseTable = {
   "avg",
   "first",
   "stddev_samp",
+  "__sirius_mo_decimal_sum",
+  "__sirius_mo_decimal_avg",
+  "__sirius_mo_decimal_min",
+  "__sirius_mo_decimal_max",
 };
 
 static_assert(static_cast<std::size_t>(aggregate_id::stddev_samp) + 1 == 9,
-              "aggregate_id::stddev_samp must be the last entry; cardinality locked at 9.");
-static_assert(kReverseTable.size() == 9,
+              "Ordinary aggregate IDs retain their upstream values.");
+static_assert(kReverseTable.size() == 13,
               "kReverseTable must have one slot per aggregate_id value.");
-static_assert(kForwardTable.size() == 9,
+static_assert(kForwardTable.size() == 13,
               "kForwardTable must have one entry per aggregate_id value.");
 
 // Walks both tables to ensure every enum value has exactly one canonical
