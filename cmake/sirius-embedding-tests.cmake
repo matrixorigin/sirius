@@ -25,6 +25,21 @@ sirius_link_duckdb_extensions(sirius_native_tae_unittest)
 # Control/credit tests need neither a GPU nor DuckDB initialization. The C
 # consumer below separately proves the real static dependency/link boundary.
 add_executable(
+  sirius_exact_decimal_unittest test/cpp/exec/execution_evidence_unittest.cpp
+                                test/cpp/embedding/test_exact_decimal.cpp)
+target_compile_features(sirius_exact_decimal_unittest PRIVATE cxx_std_20)
+target_include_directories(
+  sirius_exact_decimal_unittest PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
+                                        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+add_executable(sirius_exact_decimal_benchmark EXCLUDE_FROM_ALL
+               bench/mo_exact_decimal.cpp)
+target_compile_features(sirius_exact_decimal_benchmark PRIVATE cxx_std_20)
+target_include_directories(sirius_exact_decimal_benchmark
+                           PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(sirius_exact_decimal_benchmark PRIVATE sirius_extension)
+
+add_executable(
   sirius_native_control_unittest
   test/cpp/exec/execution_evidence_unittest.cpp
   test/cpp/embedding/test_native_control.cpp
@@ -73,6 +88,7 @@ add_executable(
   test/cpp/embedding/test_native_gpu.cpp
   test/cpp/embedding/test_native_admission.cpp
   test/cpp/embedding/test_native_result_codec.cpp
+  test/cpp/embedding/test_exact_decimal_gpu.cpp
   test/cpp/embedding/test_tae_gpu.cpp
   src/embedding/c_api.cpp)
 target_compile_features(sirius_native_gpu_unittest PRIVATE cxx_std_20)

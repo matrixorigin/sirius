@@ -423,11 +423,11 @@ TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs"
   auto* gpu = manager.get_memory_spaces_for_tier(cucascade::memory::Tier::GPU).front();
   auto pool = make_native_input_pool(*host);
   rmm::cuda_stream stream;
-  for (uint32_t oid : {10, 20, 21, 22, 23, 25, 26, 27, 28, 30, 31, 32, 33, 50, 52}) {
+  for (uint32_t oid : {10, 20, 21, 22, 23, 25, 26, 27, 28, 30, 31, 32, 33, 34, 50, 52}) {
     for (uint32_t cls : {SIRIUS_VECTOR_FLAT, SIRIUS_VECTOR_CONSTANT, SIRIUS_VECTOR_NULL}) {
       INFO("oid=" << oid << " vector_class=" << cls);
       auto width = input_element_size(oid);
-      sirius_input_column schema{oid, oid == 32 ? 18 : 38, 2, 1};
+      sirius_input_column schema{oid, oid == 32 ? 18 : oid == 34 ? 65 : 38, 2, 1};
       auto input = std::make_shared<native_input>(
         1, std::vector{schema}, std::stop_token{}, clock::now() + 30s);
       input->activate(pool);
@@ -439,7 +439,12 @@ TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs"
         if (oid == 50) lo += 719162;
         if (oid == 52) lo += 62135596800000000ULL;
         std::memcpy(raw.data() + row * width, &lo, std::min<std::size_t>(width, 8));
-        if (width == 16) std::memcpy(raw.data() + row * width + 8, &hi, 8);
+        if (width >= 16) std::memcpy(raw.data() + row * width + 8, &hi, 8);
+        if (width == 32) {
+          uint64_t mid = 0xfedcba987654321ULL, high = row % 2 ? UINT64_MAX : 7;
+          std::memcpy(raw.data() + row * width + 16, &mid, 8);
+          std::memcpy(raw.data() + row * width + 24, &high, 8);
+        }
       }
       if (cls == SIRIUS_VECTOR_FLAT)
         raw[physical * width + 7] = std::byte{128};  // row 63 NULL, omitted row-64 word is zero
@@ -458,11 +463,24 @@ TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs"
         auto table = convert_native_input(*unit, input->schema, *gpu, stream.view());
         std::vector<std::byte> values(65 * width);
         uint32_t mask[3]{};
-        cudaMemcpyAsync(values.data(),
-                        table->view().column(0).head<uint8_t>(),
-                        values.size(),
-                        cudaMemcpyDeviceToHost,
-                        stream.value());
+        if (oid == 34) {
+          std::vector<uint64_t> lane(65);
+          for (int limb = 0; limb < 4; ++limb) {
+            cudaMemcpyAsync(lane.data(),
+                            table->view().column(0).child(3 - limb).head<uint64_t>(),
+                            lane.size() * 8,
+                            cudaMemcpyDeviceToHost,
+                            stream.value());
+            stream.synchronize();
+            for (uint32_t row = 0; row < 65; ++row)
+              std::memcpy(values.data() + row * 32 + limb * 8, &lane[row], 8);
+          }
+        } else
+          cudaMemcpyAsync(values.data(),
+                          table->view().column(0).head<uint8_t>(),
+                          values.size(),
+                          cudaMemcpyDeviceToHost,
+                          stream.value());
         cudaMemcpyAsync(mask,
                         table->view().column(0).null_mask(),
                         sizeof(mask),
