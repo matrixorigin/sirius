@@ -29,7 +29,7 @@ add_executable(
                                 test/cpp/embedding/test_exact_decimal.cpp)
 target_compile_features(sirius_exact_decimal_unittest PRIVATE cxx_std_20)
 target_include_directories(
-  sirius_exact_decimal_unittest PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
+  sirius_exact_decimal_unittest PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
                                         "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 add_executable(sirius_exact_decimal_benchmark EXCLUDE_FROM_ALL
@@ -37,7 +37,7 @@ add_executable(sirius_exact_decimal_benchmark EXCLUDE_FROM_ALL
 target_compile_features(sirius_exact_decimal_benchmark PRIVATE cxx_std_20)
 target_include_directories(sirius_exact_decimal_benchmark
                            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(sirius_exact_decimal_benchmark PRIVATE sirius_extension)
+target_link_libraries(sirius_exact_decimal_benchmark PRIVATE sirius_core)
 
 add_executable(
   sirius_native_control_unittest
@@ -71,11 +71,16 @@ target_link_libraries(sirius_native_result_integration PRIVATE Sirius::embed
 add_executable(
   sirius_native_binding_unittest
   test/cpp/exec/execution_evidence_unittest.cpp
-  test/cpp/embedding/test_native_binding.cpp src/embedding/plan.cpp)
+  test/cpp/embedding/test_native_binding.cpp
+  test/cpp/embedding/test_decimal_import.cpp
+  test/cpp/expression/test_function_id.cpp
+  test/cpp/helper/test_logical_type.cpp
+  src/embedding/plan.cpp)
 target_compile_features(sirius_native_binding_unittest PRIVATE cxx_std_20)
 target_include_directories(
   sirius_native_binding_unittest
   PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
+          "${SIRIUS_SUBSTRAIT_DIR}/src/include"
           "${CMAKE_CURRENT_SOURCE_DIR}/src"
           "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include"
           "${SIRIUS_SUBSTRAIT_DIR}/third_party"
@@ -89,18 +94,20 @@ add_executable(
   test/cpp/embedding/test_native_admission.cpp
   test/cpp/embedding/test_native_result_codec.cpp
   test/cpp/embedding/test_exact_decimal_gpu.cpp
+  test/cpp/embedding/test_decimal_expression_gpu.cpp
   test/cpp/embedding/test_tae_gpu.cpp
   src/embedding/c_api.cpp)
 target_compile_features(sirius_native_gpu_unittest PRIVATE cxx_std_20)
 target_include_directories(
   sirius_native_gpu_unittest
-  PRIVATE
-    "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/include")
+  PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
+          "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp"
+          "${SIRIUS_SUBSTRAIT_DIR}/src/include"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/src")
 target_compile_definitions(
   sirius_native_gpu_unittest
   PRIVATE SIRIUS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -116,6 +123,7 @@ set_property(
   APPEND
   PROPERTY LINK_DEPENDS
            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_embed_link.py"
+           "${CMAKE_CURRENT_SOURCE_DIR}/proto/matrixone/sirius/numeric/v1/exact_decimal.proto"
            "${CMAKE_CURRENT_SOURCE_DIR}/src/sirius_c.h")
 add_custom_command(
   TARGET sirius_c_smoke

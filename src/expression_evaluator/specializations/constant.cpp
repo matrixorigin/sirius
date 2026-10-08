@@ -15,6 +15,8 @@
  */
 
 // sirius
+#include "numeric/exact_decimal_gpu.hpp"
+
 #include <expression/ast/node.hpp>
 #include <expression/value.hpp>
 #include <expression_evaluator/expression_evaluator.hpp>
@@ -51,6 +53,14 @@ using evaluate_result = expression_evaluator::evaluate_result;
 evaluate_result expression_evaluator::evaluate(sirius::ast::constant const& alt,
                                                evaluation_mode mode)
 {
+  if (alt.return_type().is_mo_decimal()) {
+    bool valid = !std::holds_alternative<sirius::null_value>(alt.payload);
+    auto value = valid ? std::get<mo_decimal::coefficient>(alt.payload) : mo_decimal::coefficient{};
+    auto column = mo_decimal::make_decimal_literal(
+      alt.return_type().mo_decimal_type(), value, valid, _input_table.num_rows(), _stream, _mr);
+    return mode == evaluation_mode::AST ? materialize_as_ast_column(std::move(column))
+                                        : evaluate_result(std::move(column));
+  }
   auto const cudf_type = sirius::get_cudf_type(alt.return_type());
   bool const is_valid  = !std::holds_alternative<sirius::null_value>(alt.payload);
 
