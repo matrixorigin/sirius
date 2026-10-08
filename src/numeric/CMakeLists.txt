@@ -1,0 +1,1 @@
+target_sources(sirius_objects PRIVATE exact_decimal_gpu.cu)
