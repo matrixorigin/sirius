@@ -49,17 +49,24 @@ target_link_libraries(sirius_native_result_integration PRIVATE Sirius::embed
 add_executable(
   sirius_native_binding_unittest
   test/cpp/exec/execution_evidence_unittest.cpp
-  test/cpp/embedding/test_native_binding.cpp src/embedding/plan.cpp)
+  test/cpp/embedding/test_native_binding.cpp
+  test/cpp/embedding/test_decimal_import.cpp
+  test/cpp/expression/test_function_id.cpp
+  test/cpp/helper/test_logical_type.cpp
+  src/embedding/plan.cpp)
 target_compile_features(sirius_native_binding_unittest PRIVATE cxx_std_20)
 target_include_directories(
   sirius_native_binding_unittest
   PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
+          "${SIRIUS_SUBSTRAIT_DIR}/src/include"
           "${CMAKE_CURRENT_SOURCE_DIR}/src"
           "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include"
           "${SIRIUS_SUBSTRAIT_DIR}/third_party"
           "${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait")
-target_link_libraries(sirius_native_binding_unittest PRIVATE sirius_extension
-                                                             Threads::Threads)
+target_link_libraries(
+  sirius_native_binding_unittest
+  PRIVATE sirius_extension duckdb_static dummy_static_extension_loader
+          Threads::Threads)
 
 add_executable(
   sirius_native_gpu_unittest
@@ -68,6 +75,7 @@ add_executable(
   test/cpp/embedding/test_native_admission.cpp
   test/cpp/embedding/test_native_result_codec.cpp
   test/cpp/embedding/test_exact_decimal_gpu.cpp
+  test/cpp/embedding/test_decimal_expression_gpu.cpp
   test/cpp/embedding/test_tae_gpu.cpp
   src/embedding/c_api.cpp)
 target_compile_features(sirius_native_gpu_unittest PRIVATE cxx_std_20)
@@ -75,6 +83,9 @@ target_include_directories(
   sirius_native_gpu_unittest
   PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
           "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp"
+          "${SIRIUS_SUBSTRAIT_DIR}/src/include"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait"
           "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include"
           "${CMAKE_CURRENT_SOURCE_DIR}/src"
           "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/src")

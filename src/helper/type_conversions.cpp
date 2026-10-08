@@ -17,6 +17,7 @@
 #include "helper/type_conversions.hpp"
 
 #include "duckdb/common/optional_idx.hpp"
+#include "numeric/decimal_types.hpp"
 
 #include <duckdb/common/exception.hpp>
 #include <duckdb/common/types.hpp>
@@ -26,6 +27,7 @@ namespace sirius {
 
 logical_type from_duckdb(const duckdb::LogicalType& t)
 {
+  if (auto exact = mo_decimal::from_duckdb_type(t)) return *exact;
   using duckdb::LogicalTypeId;
   switch (t.id()) {
     case LogicalTypeId::SQLNULL: return logical_type::make(type_id::SQLNULL);
@@ -68,6 +70,9 @@ logical_type from_duckdb(const duckdb::LogicalType& t)
 
 duckdb::LogicalType to_duckdb(const logical_type& t)
 {
+  if (t.is_mo_decimal() ||
+      (t.nullability() && (t.id() == type_id::BOOLEAN || t.id() == type_id::BIGINT)))
+    return mo_decimal::duckdb_type(t);
   using duckdb::LogicalType;
   switch (t.id()) {
     case type_id::SQLNULL: return LogicalType::SQLNULL;

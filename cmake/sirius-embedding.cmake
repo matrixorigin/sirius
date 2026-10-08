@@ -26,9 +26,11 @@ target_link_libraries(sirius_c_smoke PRIVATE Sirius::embed)
 set_property(
   TARGET sirius_c_smoke
   APPEND
-  PROPERTY LINK_DEPENDS
-           "${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_embed_link.py"
-           "${CMAKE_CURRENT_SOURCE_DIR}/src/sirius_c.h")
+  PROPERTY
+    LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_embed_link.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/proto/matrixone/sirius/numeric/v1/exact_decimal.proto"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sirius_c.h")
 add_custom_command(
   TARGET sirius_c_smoke
   POST_BUILD

@@ -149,7 +149,8 @@ using value = std::variant<null_value,
                            decimal32,
                            decimal64,
                            decimal128,
-                           std::string>;
+                           std::string,
+                           mo_decimal::coefficient>;
 
 /**
  * @brief Convert a duckdb::Value to a sirius::value.

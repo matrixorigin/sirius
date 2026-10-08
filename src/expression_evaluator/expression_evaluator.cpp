@@ -15,7 +15,10 @@
  */
 
 // sirius
+#include "pipeline/gpu_stream_quiescence_error.hpp"
+
 #include <cudf/cudf_utils.hpp>
+#include <cudf/utilities/error.hpp>
 
 #include <expression/ast/aggregate.hpp>  // sirius::ast::aggregate
 #include <expression/ast/node.hpp>       // sirius::ast::node alternatives
@@ -266,86 +269,108 @@ void expression_evaluator::release_temporaries(
 
 std::unique_ptr<cudf::table> expression_evaluator::evaluate(cudf::table_view input)
 {
-  _output_columns.clear();
-  _output_columns.reserve(_ast_expressions.size());
-
-  // Reset AST state from any previous invocation so that the tree, temp scalars, temp columns,
-  // the restored-reference cache over them, and the per-call instrumentation do not carry stale
-  // state across calls.
-  _restored_reference_cache.clear();
-  _restored_reference_cast_count  = 0;
-  _narrow_domain_comparison_count = 0;
-  _ast_tree                       = cudf::ast::tree{};
-  _temp_scalars.clear();
-  _temp_columns.clear();
-
-  // Get the table_view from the input_batch
-  _input_table = std::move(input);
-
-  // Per-result column post-processing. The node's kind and result type are read
-  // natively from the Sirius AST (no DuckDB round-trip).
-  auto post_process = [this](sirius::ast::node const& expr, evaluate_result result) {
-    if (expr.holds<sirius::ast::reference>()) {
-      // A narrowed reference restores as a view of a column owned by the per-evaluation restoration
-      // cache; an unchanged reference stays a zero-copy view of the input. Copying the view (or
-      // releasing an owned column) gives the output table independent columns.
-      if (result.is_owned_column()) {
-        _output_columns.push_back(result.release_column());
-      } else {
-        _output_columns.push_back(
-          std::make_unique<cudf::column>(result.get_column_view(), _stream, _mr));
-      }
-    } else {
-      // Cast the `result` from libcudf to the node's return type if `result` has a different
-      // type. E.g., `extract(year from col)` from libcudf returns int16_t but the SQL type is
-      // int64_t. Only use cudf::cast when both types are fixed-width (cast does not support
-      // STRING/LIST/STRUCT).
-      auto const cudf_return_type = sirius::get_cudf_type(expr.return_type());
-      std::unique_ptr<cudf::column> result_column;
-      if (result.is_scalar()) {
-        result_column =
-          cudf::make_column_from_scalar(result.get_scalar(), _input_table.num_rows(), _stream, _mr);
-      } else if (result.is_column_view()) {
-        result_column = std::make_unique<cudf::column>(result.get_column_view(), _stream, _mr);
-      } else {
-        result_column = result.release_column();
-      }
-      if (result_column->type() != cudf_return_type) {
-        // Cast is only valid for fixed-width types (no STRING/LIST/STRUCT/etc.).
-        if (IsFixedWidth(result_column->type()) && IsFixedWidth(cudf_return_type)) {
-          // Final result-type reconciliation is a physical schema restore. The declared output
-          // type provides the provenance needed to restore a narrowed DATE representation.
-          result_column =
-            sirius::cast_through_rep(result_column->view(), cudf_return_type, _stream, _mr);
-        } else {
-          throw internal_exception("[expression_evaluator] Unsupported type conversion: {} to {}",
-                                   cudf::type_to_name(result_column->type()),
-                                   cudf::type_to_name(cudf_return_type));
-        }
-      }
-      _output_columns.push_back(std::move(result_column));
-    }
+  struct unsafe_temporaries {
+    std::vector<std::unique_ptr<cudf::column>> outputs, columns;
+    std::vector<std::unique_ptr<cudf::scalar>> scalars;
   };
+  auto quarantine = uses_mo_expressions() ? std::make_unique<unsafe_temporaries>() : nullptr;
+  try {
+    _output_columns.clear();
+    _output_columns.reserve(_ast_expressions.size());
 
-  // Iterate _ast_expressions and route through the std::visit dispatcher, then
-  // post-process each result using the node's native kind + return type.
-  for (auto const* ast_expr : _ast_expressions) {
-    if (!ast_expr) {
-      // This is a Sirius bug, not a user error: a null slot means from_duckdb
-      // declined an expression as unsupported, but the planner still routed it
-      // to the GPU executor.  This hard-fails the query instead of falling back to CPU.
-      // TODO fix to ensure the planner never builds a GPU projection containing unsupported
-      // expressions.
-      throw internal_exception(
-        "[expression_evaluator] null expression in select list — "
-        "from_duckdb returned nullptr for an unsupported expression; "
-        "cannot evaluate on GPU");
+    // Reset AST state from any previous invocation so that the tree, temp scalars, temp columns,
+    // the restored-reference cache over them, and the per-call instrumentation do not carry stale
+    // state across calls.
+    _restored_reference_cache.clear();
+    _restored_reference_cast_count  = 0;
+    _narrow_domain_comparison_count = 0;
+    _ast_tree                       = cudf::ast::tree{};
+    _temp_scalars.clear();
+    _temp_columns.clear();
+
+    // Get the table_view from the input_batch
+    _input_table = std::move(input);
+
+    // Per-result column post-processing. The node's kind and result type are read
+    // natively from the Sirius AST (no DuckDB round-trip).
+    auto post_process = [this](sirius::ast::node const& expr, evaluate_result result) {
+      if (expr.holds<sirius::ast::reference>()) {
+        // A narrowed reference restores as a view of a column owned by the per-evaluation
+        // restoration cache; an unchanged reference stays a zero-copy view of the input. Copying
+        // the view (or releasing an owned column) gives the output table independent columns.
+        if (result.is_owned_column()) {
+          _output_columns.push_back(result.release_column());
+        } else {
+          _output_columns.push_back(
+            std::make_unique<cudf::column>(result.get_column_view(), _stream, _mr));
+        }
+      } else {
+        // Cast the `result` from libcudf to the node's return type if `result` has a different
+        // type. E.g., `extract(year from col)` from libcudf returns int16_t but the SQL type is
+        // int64_t. Only use cudf::cast when both types are fixed-width (cast does not support
+        // STRING/LIST/STRUCT).
+        auto const cudf_return_type = sirius::get_cudf_type(expr.return_type());
+        std::unique_ptr<cudf::column> result_column;
+        if (result.is_scalar()) {
+          result_column = cudf::make_column_from_scalar(
+            result.get_scalar(), _input_table.num_rows(), _stream, _mr);
+        } else if (result.is_column_view()) {
+          result_column = std::make_unique<cudf::column>(result.get_column_view(), _stream, _mr);
+        } else {
+          result_column = result.release_column();
+        }
+        if (expr.return_type().is_mo_decimal() &&
+            !mo_decimal::decimal_column_matches(result_column->view(),
+                                                expr.return_type().mo_decimal_type()))
+          throw std::invalid_argument(
+            "MO exact-decimal result carrier does not match its descriptor");
+        if (result_column->type() != cudf_return_type) {
+          // Cast is only valid for fixed-width types (no STRING/LIST/STRUCT/etc.).
+          if (IsFixedWidth(result_column->type()) && IsFixedWidth(cudf_return_type)) {
+            // Final result-type reconciliation is a physical schema restore. The declared output
+            // type provides the provenance needed to restore a narrowed DATE representation.
+            result_column =
+              sirius::cast_through_rep(result_column->view(), cudf_return_type, _stream, _mr);
+          } else {
+            throw internal_exception("[expression_evaluator] Unsupported type conversion: {} to {}",
+                                     cudf::type_to_name(result_column->type()),
+                                     cudf::type_to_name(cudf_return_type));
+          }
+        }
+        _output_columns.push_back(std::move(result_column));
+      }
+    };
+
+    // Iterate _ast_expressions and route through the std::visit dispatcher, then
+    // post-process each result using the node's native kind + return type.
+    for (auto const* ast_expr : _ast_expressions) {
+      if (!ast_expr) {
+        // This is a Sirius bug, not a user error: a null slot means from_duckdb
+        // declined an expression as unsupported, but the planner still routed it
+        // to the GPU executor.  This hard-fails the query instead of falling back to CPU.
+        // TODO fix to ensure the planner never builds a GPU projection containing unsupported
+        // expressions.
+        throw internal_exception(
+          "[expression_evaluator] null expression in select list — "
+          "from_duckdb returned nullptr for an unsupported expression; "
+          "cannot evaluate on GPU");
+      }
+      auto result = evaluate(*ast_expr, evaluation_mode::MATERIALIZE);
+      post_process(*ast_expr, std::move(result));
     }
-    auto result = evaluate(*ast_expr, evaluation_mode::MATERIALIZE);
-    post_process(*ast_expr, std::move(result));
-  }
 
-  return std::make_unique<cudf::table>(std::move(_output_columns));
+    return std::make_unique<cudf::table>(std::move(_output_columns));
+  } catch (...) {
+    if (quarantine && cudaStreamSynchronize(_stream.get()) != cudaSuccess) {
+      quarantine->outputs = std::move(_output_columns);
+      quarantine->columns = std::move(_temp_columns);
+      quarantine->scalars = std::move(_temp_scalars);
+      (void)quarantine.release();
+      throw pipeline::gpu_stream_quiescence_error(
+        "MO expression temporaries could not prove quiescence");
+    }
+    throw;
+  }
 }
 
 std::unique_ptr<cudf::column> expression_evaluator::compute_mask(cudf::table_view input)

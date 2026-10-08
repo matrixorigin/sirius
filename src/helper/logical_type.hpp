@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "numeric/decimal_type.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -60,6 +62,7 @@ enum class type_id : uint8_t {
   LIST,
   ARRAY,  // fixed-sized list type
   DECIMAL,
+  MO_DECIMAL,  ///< Embedded MO carrier width is independent of declared precision.
 };
 
 //===----------------------------------------------------------------------===//
@@ -105,7 +108,12 @@ class logical_type {
    * @brief Construct a non-DECIMAL logical type.
    * @param id  The SQL type identifier (must not be DECIMAL).
    */
-  static logical_type make(type_id id) { return logical_type(id, 0, 0); }
+  static logical_type make(type_id id)
+  {
+    if (id == type_id::MO_DECIMAL)
+      throw std::invalid_argument("MO decimal types require an explicit physical descriptor");
+    return logical_type(id, 0, 0);
+  }
 
   /**
    * @brief Construct a DECIMAL logical type with full precision and scale.
@@ -115,6 +123,30 @@ class logical_type {
   static logical_type make_decimal(uint8_t precision, uint8_t scale)
   {
     return logical_type(type_id::DECIMAL, precision, scale);
+  }
+
+  static logical_type make_mo_decimal(mo_decimal::decimal_type type, bool nullable)
+  {
+    if (!type.valid()) throw std::invalid_argument("invalid MO exact-decimal type");
+    logical_type result(type_id::MO_DECIMAL, type.precision, type.scale);
+    result._decimal_bits = type.bits;
+    result._nullability  = nullable ? 2 : 1;
+    return result;
+  }
+
+  bool is_mo_decimal() const noexcept { return _id == type_id::MO_DECIMAL; }
+  mo_decimal::decimal_type mo_decimal_type() const
+  {
+    if (!is_mo_decimal()) throw std::invalid_argument("not an MO exact-decimal type");
+    return {_decimal_bits, _precision, _scale};
+  }
+  // Zero is unspecified for ordinary types; exact bindings preserve required/nullable.
+  uint8_t nullability() const noexcept { return _nullability; }
+  logical_type with_nullability(bool nullable) const
+  {
+    auto result         = *this;
+    result._nullability = nullable ? 2 : 1;
+    return result;
   }
 
   /**
@@ -168,7 +200,7 @@ class logical_type {
   bool is_numeric() const noexcept
   {
     return is_integer() || _id == type_id::FLOAT || _id == type_id::DOUBLE ||
-           _id == type_id::DECIMAL;
+           _id == type_id::DECIMAL || _id == type_id::MO_DECIMAL;
   }
 
   /// Returns true if this is a date or timestamp type (any precision).
@@ -256,6 +288,7 @@ class logical_type {
       case type_id::TIMESTAMP_MS:
       case type_id::TIMESTAMP:
       case type_id::TIMESTAMP_NS: return 8;
+      case type_id::MO_DECIMAL: return _decimal_bits / 8;
       case type_id::DECIMAL:
         if (_precision <= decimal_max_precision_int32) return 4;  // DECIMAL32
         if (_precision <= decimal_max_precision_int64) return 8;  // DECIMAL64
@@ -302,6 +335,9 @@ class logical_type {
         std::string child = _child ? _child->to_string() : "?";
         return _array_size == 0 ? child + "[ANY]" : child + "[" + std::to_string(_array_size) + "]";
       }
+      case type_id::MO_DECIMAL:
+        return "MO_DECIMAL" + std::to_string(_decimal_bits) + "(" + std::to_string(_precision) +
+               "," + std::to_string(_scale) + ")";
       case type_id::DECIMAL:
         return "DECIMAL(" + std::to_string(_precision) + "," + std::to_string(_scale) + ")";
       default: return "UNKNOWN";
@@ -316,7 +352,8 @@ class logical_type {
   {
     // base field
     bool base_eq = _id == other._id && _precision == other._precision && _scale == other._scale &&
-                   _array_size == other._array_size;
+                   _array_size == other._array_size && _decimal_bits == other._decimal_bits &&
+                   _nullability == other._nullability;
     if (!base_eq) return false;
 
     // recursively compare types for child
@@ -335,6 +372,9 @@ class logical_type {
   type_id _id;
   uint8_t _precision{0};  ///< Meaningful only for DECIMAL: total significant digits (1–38)
   uint8_t _scale{0};      ///< Meaningful only for DECIMAL: fractional digits (0–precision)
+
+  uint16_t _decimal_bits{0};
+  uint8_t _nullability{0};
 
   // array
   uint32_t _array_size{0};               ///< Meaningful only for ARRAY: fixed size (0 = any size)

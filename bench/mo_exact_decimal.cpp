@@ -1,4 +1,6 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
+#include "expression/ast/node.hpp"
+#include "expression_evaluator/expression_evaluator.hpp"
 #include "numeric/exact_decimal_gpu.hpp"
 
 #include <cudf/binaryop.hpp>
@@ -117,4 +119,23 @@ int main()
         return evaluate_decimal_columns(
           operation, x->view(), wide, y->view(), wide, wide, nullptr, stream.view(), mr);
       });
+  // A values-identical ordinary-expression control makes the evaluator's
+  // additional admission/error/mask cost visible. It is not a full-domain
+  // semantic baseline for checked numeric errors or a SQL rollout gate.
+  for (bool checked : {false, true}) {
+    auto type = checked ? sirius::logical_type::make_mo_decimal(narrow, false)
+                        : sirius::logical_type::make_decimal(18, 0);
+    std::vector<std::unique_ptr<sirius::ast::node>> arguments;
+    arguments.push_back(std::make_unique<sirius::ast::node>(sirius::ast::reference{0, type}));
+    arguments.push_back(std::make_unique<sirius::ast::node>(sirius::ast::reference{1, type}));
+    sirius::ast::node expression(sirius::ast::function_call{
+      checked ? sirius::function_id::mo_decimal_add : sirius::function_id::add,
+      std::move(arguments),
+      type});
+    sirius::expression_evaluator evaluator(
+      expression, mr, stream.view(), sirius::expression_evaluator_strategy::MATERIALIZE);
+    measure(checked ? "exact_expression_add64" : "ordinary_expression_add64", stream.view(), [&] {
+      return evaluator.evaluate(cudf::table_view{{a->view(), b->view()}});
+    });
+  }
 }
