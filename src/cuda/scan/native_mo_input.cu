@@ -1,5 +1,6 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "embedding/native_gpu.hpp"
+#include "numeric/exact_decimal_gpu.hpp"
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 
 #include <cudf/column/column_factories.hpp>
@@ -87,6 +88,27 @@ __global__ void scatter(device_slice const* slices, int32_t const* offsets, uint
       dst[b] = src[b];
   }
 }
+__global__ void decode_wide(device_slice const* slices,
+                            uint64_t* high,
+                            uint64_t* mid_high,
+                            uint64_t* mid_low,
+                            uint64_t* low,
+                            uint32_t* validity)
+{
+  auto const& d = slices[blockIdx.y];
+  for (uint32_t r = blockIdx.x * blockDim.x + threadIdx.x; r < d.rows;
+       r += blockDim.x * gridDim.x) {
+    auto row = d.begin + r, out = d.output + r;
+    bool null = is_null(d, row);
+    if (null) atomicAnd(validity + out / 32, ~(1u << (out % 32)));
+    auto source_row = d.column.vector_class == SIRIUS_VECTOR_CONSTANT ? 0 : row;
+    auto source     = null ? nullptr : d.base + d.column.data_offset + uint64_t(source_row) * 32;
+    uint64_t* limbs[]{low, mid_low, mid_high, high};
+    for (int limb = 0; limb < 4; ++limb)
+      limbs[limb][out] =
+        null ? 0 : uint64_t(u32(source + limb * 8)) | (uint64_t(u32(source + limb * 8 + 4)) << 32);
+  }
+}
 cudf::data_type type(sirius_input_column const& c)
 {
   using id = cudf::type_id;
@@ -104,6 +126,7 @@ cudf::data_type type(sirius_input_column const& c)
     case 31: return cudf::data_type{id::FLOAT64};
     case 32: return cudf::data_type{id::DECIMAL64, -c.scale};
     case 33: return cudf::data_type{id::DECIMAL128, -c.scale};
+    case 34: return cudf::data_type{id::STRUCT};
     case 50: return cudf::data_type{id::TIMESTAMP_DAYS};
     case 52: return cudf::data_type{id::TIMESTAMP_MICROSECONDS};
     default: return cudf::data_type{id::STRING};
@@ -126,8 +149,17 @@ std::unique_ptr<cudf::table> convert_native_input(input_unit const& unit,
     if (!unit.rows) {
       if (schema.empty())
         owner->columns.push_back(cudf::make_empty_column(cudf::data_type{cudf::type_id::INT8}));
-      for (auto const& c : schema)
-        owner->columns.push_back(cudf::make_empty_column(type(c)));
+      for (auto const& c : schema) {
+        if (c.oid == 34)
+          owner->columns.push_back(mo_decimal::make_decimal_column(
+            {256, static_cast<uint8_t>(c.width), static_cast<uint8_t>(c.scale)},
+            0,
+            cudf::mask_state::UNALLOCATED,
+            stream,
+            mr));
+        else
+          owner->columns.push_back(cudf::make_empty_column(type(c)));
+      }
       return std::make_unique<cudf::table>(std::move(owner->columns));
     }
     for (auto const& slice : unit.slices) {
@@ -167,7 +199,24 @@ std::unique_ptr<cudf::table> convert_native_input(input_unit const& unit,
         desc.data(), host.data(), desc.size(), cudaMemcpyHostToDevice, stream.value()));
       auto d = static_cast<const device_slice*>(desc.data());
       dim3 grid(128, host.size());
-      if (!input_string_type(schema[c].oid)) {
+      if (schema[c].oid == 34) {
+        auto col = mo_decimal::make_decimal_column(
+          {256, static_cast<uint8_t>(schema[c].width), static_cast<uint8_t>(schema[c].scale)},
+          unit.rows,
+          cudf::mask_state::ALL_VALID,
+          stream,
+          mr);
+        owner->columns.push_back(std::move(col));
+        auto v = owner->columns.back()->mutable_view();
+        decode_wide<<<grid, 256, 0, stream.value()>>>(d,
+                                                      v.child(0).data<uint64_t>(),
+                                                      v.child(1).data<uint64_t>(),
+                                                      v.child(2).data<uint64_t>(),
+                                                      v.child(3).data<uint64_t>(),
+                                                      v.null_mask());
+        CUDF_CUDA_TRY(cudaGetLastError());
+        owner->columns.back()->set_null_count(unit.nulls[c]);
+      } else if (!input_string_type(schema[c].oid)) {
         auto col = cudf::make_fixed_width_column(
           type(schema[c]), unit.rows, cudf::mask_state::ALL_VALID, stream, mr);
         owner->columns.push_back(std::move(col));
