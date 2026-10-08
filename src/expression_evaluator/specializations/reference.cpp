@@ -72,8 +72,14 @@ evaluate_result expression_evaluator::get_or_create_restored_reference(std::uint
 evaluate_result expression_evaluator::evaluate(sirius::ast::reference const& alt,
                                                evaluation_mode mode)
 {
-  auto const source   = _input_table.column(alt.column_index);
   auto const& logical = alt.return_type();
+  if (logical.is_mo_decimal() &&
+      alt.column_index >= static_cast<uint32_t>(_input_table.num_columns()))
+    throw std::invalid_argument("MO exact-decimal reference is outside its input schema");
+  auto const source = _input_table.column(alt.column_index);
+  if (logical.is_mo_decimal() &&
+      !mo_decimal::decimal_column_matches(source, logical.mo_decimal_type()))
+    throw std::invalid_argument("MO exact-decimal reference carrier does not match its descriptor");
   if (is_narrowable_numeric_type(logical)) {
     auto const native = get_cudf_type(logical);
     if (can_restore_to(source.type(), native)) {

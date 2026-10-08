@@ -4,6 +4,8 @@
 
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/reduction.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/unary.hpp>
 #include <cudf/utilities/error.hpp>
 
@@ -12,6 +14,26 @@
 
 namespace sirius::mo_decimal {
 namespace {
+__global__ void broadcast_literal(coefficient value,
+                                  uint32_t bytes,
+                                  cudf::size_type rows,
+                                  uint8_t* data,
+                                  uint64_t* high,
+                                  uint64_t* mid_high,
+                                  uint64_t* mid_low,
+                                  uint64_t* low)
+{
+  for (int64_t row = blockIdx.x * blockDim.x + threadIdx.x; row < rows;
+       row += blockDim.x * gridDim.x) {
+    if (bytes != 32)
+      store_coefficient(value, data + row * bytes, bytes);
+    else {
+      uint64_t* limbs[]{low, mid_low, mid_high, high};
+      for (int i = 0; i < 4; ++i)
+        limbs[i][row] = uint64_t(value.words[2 * i]) | uint64_t(value.words[2 * i + 1]) << 32;
+    }
+  }
+}
 struct operand {
   uint8_t const* data{};
   uint64_t const* limbs[4]{};
@@ -124,6 +146,73 @@ __global__ void evaluate(decimal_op op,
   }
 }
 }  // namespace
+
+std::unique_ptr<cudf::column> make_decimal_literal(decimal_type type,
+                                                   coefficient value,
+                                                   bool valid,
+                                                   cudf::size_type rows,
+                                                   rmm::cuda_stream_view stream,
+                                                   rmm::device_async_resource_ref mr)
+{
+  if (!type.valid() || rows < 0)
+    throw std::invalid_argument("invalid MO exact-decimal literal descriptor");
+  if (valid && evaluate_decimal(decimal_op::cast, value, type, true, {}, type, true, type).error !=
+                 decimal_error::none)
+    throw std::invalid_argument("MO exact-decimal literal exceeds declared precision");
+  auto owner = std::make_unique<std::unique_ptr<cudf::column>>();
+  try {
+    *owner = make_decimal_column(
+      type, rows, valid ? cudf::mask_state::ALL_VALID : cudf::mask_state::ALL_NULL, stream, mr);
+    if (rows) {
+      auto view = (*owner)->mutable_view();
+      broadcast_literal<<<128, 256, 0, stream.value()>>>(
+        valid ? value : coefficient{},
+        type.bytes(),
+        rows,
+        type.bits == 256 ? nullptr : view.data<uint8_t>(),
+        type.bits == 256 ? view.child(0).data<uint64_t>() : nullptr,
+        type.bits == 256 ? view.child(1).data<uint64_t>() : nullptr,
+        type.bits == 256 ? view.child(2).data<uint64_t>() : nullptr,
+        type.bits == 256 ? view.child(3).data<uint64_t>() : nullptr);
+      CUDF_CUDA_TRY(cudaGetLastError());
+      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.value()));
+    }
+    return std::move(*owner);
+  } catch (...) {
+    auto error = std::current_exception();
+    if (cudaStreamSynchronize(stream.value()) != cudaSuccess) {
+      (void)owner.release();
+      throw pipeline::gpu_stream_quiescence_error("MO decimal literal could not prove quiescence");
+    }
+    std::rethrow_exception(error);
+  }
+}
+decimal_error column_error(decimal_column_result const& result,
+                           rmm::cuda_stream_view stream,
+                           rmm::device_async_resource_ref mr)
+{
+  if (!result.errors.size()) return decimal_error::none;
+  cudf::column_view errors(
+    cudf::data_type{cudf::type_id::UINT8}, result.errors.size(), result.errors.data(), nullptr, 0);
+  auto owner = std::make_unique<std::unique_ptr<cudf::scalar>>();
+  try {
+    *owner    = cudf::reduce(errors,
+                          *cudf::make_max_aggregation<cudf::reduce_aggregation>(),
+                          cudf::data_type{cudf::type_id::UINT8},
+                          stream,
+                          mr);
+    auto code = static_cast<cudf::numeric_scalar<uint8_t>&>(**owner).value(stream);
+    return static_cast<decimal_error>(code);
+  } catch (...) {
+    auto error = std::current_exception();
+    if (cudaStreamSynchronize(stream.value()) != cudaSuccess) {
+      (void)owner.release();
+      throw pipeline::gpu_stream_quiescence_error(
+        "MO decimal error reduction could not prove quiescence");
+    }
+    std::rethrow_exception(error);
+  }
+}
 
 std::unique_ptr<cudf::column> make_decimal_column(decimal_type type,
                                                   cudf::size_type rows,

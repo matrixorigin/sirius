@@ -16,6 +16,8 @@
 
 #include "expression/ast/from_duckdb.hpp"
 
+#include "numeric/decimal_functions.hpp"
+
 // sirius
 #include "expression/aggregate_id.hpp"
 #include "expression/ast/aggregate.hpp"
@@ -189,6 +191,7 @@ std::unique_ptr<node> translate_function(duckdb::BoundFunctionExpression const& 
 {
   auto func_id_opt = sirius::from_duckdb_function_name(expr.function.name);
   if (!func_id_opt.has_value()) { return nullptr; }
+  if (mo_decimal::is_decimal_function(*func_id_opt)) mo_decimal::validate_bound_scalar(expr);
   auto arguments = translate_children(expr.children);
   if (!arguments) { return nullptr; }
   auto return_type = sirius::from_duckdb(expr.return_type);

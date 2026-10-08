@@ -31,7 +31,7 @@ namespace sirius {
  * test_function_id.cpp). The order is grouped by category for human
  * readability; integer values are part of the public ABI — new entries go
  * at the end of their category, never in the middle. Cardinality is
- * exactly 29 (D-01).
+ * 29 ordinary functions plus the appended MO exact-decimal family.
  */
 enum class function_id : uint16_t {
   // Arithmetic — 6 entries (also the contents of supported_ast_functions)
@@ -70,6 +70,22 @@ enum class function_id : uint16_t {
   row,
   struct_pack,
   error,
+
+  // Append only: embedded MO markers never enter ordinary function inference.
+  mo_decimal_add,
+  mo_decimal_subtract,
+  mo_decimal_multiply,
+  mo_decimal_divide,
+  mo_decimal_integer_divide,
+  mo_decimal_modulo,
+  mo_decimal_negate,
+  mo_decimal_cast,
+  mo_decimal_equal,
+  mo_decimal_not_equal,
+  mo_decimal_less,
+  mo_decimal_less_equal,
+  mo_decimal_greater,
+  mo_decimal_greater_equal,
 };
 
 /**

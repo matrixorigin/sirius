@@ -16,6 +16,8 @@
 
 #include "expression/ast/to_duckdb.hpp"
 
+#include "numeric/decimal_functions.hpp"
+
 // sirius
 #include "expression/ast/aggregate.hpp"
 #include "expression/ast/between.hpp"
@@ -247,6 +249,10 @@ std::unique_ptr<duckdb::Expression> to_duckdb(function_call const& alt)
   for (auto const& arg : alt.arguments()) {
     children.push_back(to_duck_ptr(to_duckdb(*arg)));
   }
+
+  if (mo_decimal::is_decimal_function(alt.function()))
+    return from_duck_ptr(mo_decimal::bound_scalar(
+      mo_decimal::operation(alt.function()), std::move(children), alt.return_type()));
 
   return from_duck_derived_ptr(
     duckdb::make_uniq<duckdb::BoundFunctionExpression>(std::move(return_type),

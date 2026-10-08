@@ -15,6 +15,8 @@
  */
 
 // sirius
+#include "numeric/decimal_functions.hpp"
+
 #include <expression/ast/node.hpp>
 #include <expression/function_id.hpp>
 #include <expression_evaluator/expression_evaluator.hpp>
@@ -27,6 +29,7 @@
 #include <cudf/reduction.hpp>
 
 // standard library
+#include <algorithm>
 #include <ranges>
 
 namespace sirius {
@@ -35,6 +38,15 @@ using evaluate_result = expression_evaluator::evaluate_result;
 evaluate_result expression_evaluator::evaluate(sirius::ast::case_expr const& alt,
                                                evaluation_mode mode)
 {
+  if (_mo_active_rows ||
+      (uses_mo_expressions() &&
+       (alt.return_type().is_mo_decimal() || mo_decimal::contains_exact_expression(*alt.else_) ||
+        std::any_of(alt.cases.begin(), alt.cases.end(), [](auto const& entry) {
+          return mo_decimal::contains_exact_expression(*entry.when_) ||
+                 mo_decimal::contains_exact_expression(*entry.then_);
+        }))))
+    return evaluate_mo_case(alt, mode);
+
   //===----------MATERIALIZE (AST breaker)----------===//
   // CASE cannot be represented as a cudf AST operation, so we always materialize it. If the caller
   // requested AST mode, we materialize the result and wrap it as a temporary column that the

@@ -12,6 +12,8 @@ target_sources(
           specializations/conjunction.cpp
           specializations/constant.cpp
           specializations/function.cpp
+          specializations/mo_decimal.cpp
+          specializations/mo_conditional.cpp
           specializations/narrow_domain.cpp
           specializations/operator.cpp
           specializations/reference.cpp)

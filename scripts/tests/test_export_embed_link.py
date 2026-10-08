@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -18,9 +19,16 @@ spec.loader.exec_module(sdk)
 
 
 class ExportTest(unittest.TestCase):
-    def test_export_retires_stale_gpu_manifest(self):
+    def test_export_records_literal_schema_and_retires_stale_gpu_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            relative_schema = Path(
+                "proto/matrixone/sirius/numeric/v1/exact_decimal.proto"
+            )
+            schema = root / relative_schema
+            schema.parent.mkdir(parents=True)
+            payload = b'syntax = "proto3"; message ExactDecimalLiteral { bytes coefficient_le = 1; }\n'
+            schema.write_bytes(payload)
             output = root / "embedding-sdk"
             output.mkdir()
             stale = output / "toolchain.json"
@@ -51,12 +59,21 @@ class ExportTest(unittest.TestCase):
             ), patch.object(
                 sdk, "c_compiler", return_value="/usr/bin/cc"
             ), patch.object(
-                sdk, "source_provenance", return_value={"source_revision": "test"}
+                sdk,
+                "source_provenance",
+                return_value={"source_revision": "test", "source_directory": str(root)},
             ), patch.object(
                 sdk, "artifact_hashes", return_value={}
             ):
                 sdk.main()
             self.assertFalse(stale.exists())
+            destination = output / relative_schema
+            self.assertEqual(destination.read_bytes(), payload)
+            manifest = json.loads((output / "link.json").read_text())
+            self.assertEqual(
+                manifest["artifact_sha256"][str(destination.resolve())],
+                hashlib.sha256(payload).hexdigest(),
+            )
             self.assertNotIn(
                 "gpu_toolchain_manifest", json.loads((output / "link.json").read_text())
             )

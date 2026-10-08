@@ -24,6 +24,15 @@ struct decimal_column_result {
   std::unique_ptr<cudf::column> values;
   rmm::device_uvector<uint8_t> errors;
 };
+std::unique_ptr<cudf::column> make_decimal_literal(decimal_type type,
+                                                   coefficient value,
+                                                   bool valid,
+                                                   cudf::size_type rows,
+                                                   rmm::cuda_stream_view stream,
+                                                   rmm::device_async_resource_ref mr);
+decimal_error column_error(decimal_column_result const& result,
+                           rmm::cuda_stream_view stream,
+                           rmm::device_async_resource_ref mr);
 // Caller retains operands/mask and the returned buffers until its task stream
 // is quiescent. All allocations use that stream's reservation-aware resource.
 decimal_column_result evaluate_decimal_columns(decimal_op op,

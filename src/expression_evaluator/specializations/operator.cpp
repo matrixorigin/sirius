@@ -15,6 +15,8 @@
  */
 
 // sirius
+#include "numeric/decimal_functions.hpp"
+
 #include <expression/ast/node.hpp>
 #include <expression/value.hpp>
 #include <expression_evaluator/expression_evaluator.hpp>
@@ -534,6 +536,14 @@ evaluate_result expression_evaluator::evaluate(sirius::ast::in_list const& alt,
 evaluate_result expression_evaluator::evaluate(sirius::ast::coalesce const& alt,
                                                evaluation_mode mode)
 {
+  if (_mo_active_rows ||
+      (uses_mo_expressions() &&
+       (alt.return_type().is_mo_decimal() ||
+        std::any_of(alt.children.begin(), alt.children.end(), [](auto const& child) {
+          return mo_decimal::contains_exact_expression(*child);
+        }))))
+    return evaluate_mo_coalesce(alt, mode);
+
   D_ASSERT(alt.children.size() > 1);
 
   auto current_result = evaluate(*alt.children[0], evaluation_mode::MATERIALIZE);
