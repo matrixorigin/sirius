@@ -80,6 +80,63 @@ cudf::data_type expected(owned_column const& c)
   }
 }
 std::size_t align8(std::size_t n) { return (n + 7) & ~std::size_t(7); }
+bool wide_shape_matches(cudf::column_view const& column, owned_column const& type)
+{
+  std::vector<cudf::column_view> children;
+  for (int i = 0; i < column.num_children(); ++i) {
+    auto child = column.child(i);
+    children.emplace_back(
+      child.type(), child.size(), child.head<uint8_t>(), nullptr, 0, child.offset());
+  }
+  return mo_decimal::decimal_column_matches(
+    cudf::column_view(column.type(),
+                      column.size(),
+                      nullptr,
+                      column.null_mask(),
+                      column.null_count(),
+                      column.offset(),
+                      children),
+    {256, static_cast<uint8_t>(type.width), static_cast<uint8_t>(type.scale)});
+}
+void validate_wide_validity(cudf::column_view const& column,
+                            uint32_t begin,
+                            uint32_t rows,
+                            result_batch& scratch,
+                            rmm::cuda_stream_view stream)
+{
+  bool masks = false;
+  for (int i = 0; i < column.num_children(); ++i)
+    masks |= column.child(i).nullable();
+  if (!masks) return;
+  // Use the already admitted codec slab, not an unreserved GPU allocation.
+  // Child NULLs are redundant only beneath a NULL parent; verify before this
+  // output slice can become visible. The temporary bitmaps stay on the stack.
+  for (uint32_t first = 0; first < rows; first += 1024) {
+    auto count = std::min<uint32_t>(1024, rows - first);
+    auto base  = static_cast<uint64_t>(column.offset()) + begin + first;
+    std::array<uint32_t, 33> parent, child;
+    parent.fill(UINT32_MAX);
+    if (column.nullable()) {
+      auto bytes = (base % 32 + count + 31) / 32 * 4;
+      download(*scratch.storage, 0, column.null_mask() + base / 32, bytes, stream);
+      scratch.storage->read(0, {reinterpret_cast<std::byte*>(parent.data()), bytes});
+    }
+    for (int i = 0; i < column.num_children(); ++i) {
+      auto limb = column.child(i);
+      if (limb.nullable()) {
+        auto origin = base + limb.offset();
+        auto bytes  = (origin % 32 + count + 31) / 32 * 4;
+        download(*scratch.storage, 0, limb.null_mask() + origin / 32, bytes, stream);
+        scratch.storage->read(0, {reinterpret_cast<std::byte*>(child.data()), bytes});
+        for (uint32_t row = 0; row < count; ++row) {
+          auto p = base % 32 + row, c = origin % 32 + row;
+          if ((parent[p / 32] & (1u << (p % 32))) && !(child[c / 32] & (1u << (c % 32))))
+            throw failure(SIRIUS_EXECUTION_FAILED, "Decimal256 result has independent child NULLs");
+        }
+      }
+    }
+  }
+}
 sirius_input_vector column_layout(cudf::column_view const& col,
                                   owned_column const& type,
                                   uint32_t begin,
@@ -118,10 +175,7 @@ result_slice_layout size_native_result(cudf::table_view table,
     throw failure(SIRIUS_EXECUTION_FAILED, "native result column count mismatch");
   for (std::size_t c = 0; c < schema.size(); ++c)
     if (table.column(c).type() != expected(schema[c]) ||
-        (schema[c].oid == 34 &&
-         !mo_decimal::decimal_column_matches(
-           table.column(c),
-           {256, static_cast<uint8_t>(schema[c].width), static_cast<uint8_t>(schema[c].scale)})))
+        (schema[c].oid == 34 && !wide_shape_matches(table.column(c), schema[c])))
       throw failure(SIRIUS_UNSUPPORTED, "native result physical type does not match MO contract");
   auto size = [&](uint32_t rows) {
     std::size_t position{};
@@ -158,6 +212,7 @@ void encode_native_result(cudf::table_view table,
     vector       = column_layout(col, schema[c], begin, layout.rows, position, scratch, stream);
     auto width   = input_element_size(schema[c].oid);
     if (schema[c].oid == 34) {
+      validate_wide_validity(col, begin, layout.rows, scratch, stream);
       // Reuse the admitted scratch slab; never allocate a second complete
       // result while interleaving the four fixed-width device children.
       if (scratch.storage->size() < 32)

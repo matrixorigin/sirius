@@ -4,6 +4,7 @@
 #include "embedding/buffer_budget.hpp"
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
+#include "numeric/decimal_error.hpp"
 #include "pipeline/completion_handler.hpp"
 
 #include <catch.hpp>
@@ -46,6 +47,8 @@ struct recording {
   bool fail_finish{false};
   bool startable{true};
   bool runtime_available{true};
+  sirius::mo_decimal::decimal_error numeric{sirius::mo_decimal::decimal_error::none};
+  std::function<void()> cleanup;
 };
 class test_driver final : public query_driver {
  public:
@@ -67,11 +70,14 @@ class test_driver final : public query_driver {
       changed.wait_until(lock, stop, deadline, [] { return false; });
     }
     if (r_->fail_run) throw std::runtime_error("injected execution error");
+    if (r_->numeric != sirius::mo_decimal::decimal_error::none)
+      throw sirius::mo_decimal::numeric_error(r_->numeric);
   }
   void finish() override
   {
     check_thread();
     if (r_->fail_finish) throw std::runtime_error("injected unprovable cleanup");
+    if (r_->cleanup) r_->cleanup();
     ++r_->finished;
   }
   bool startable() const noexcept override { return r_->startable; }
@@ -144,6 +150,30 @@ TEST_CASE("native coordinator keeps preparation execution and destruction on one
   CHECK(f.record->destroyed == 1);
   CHECK_FALSE(f.record->wrong_thread);
   CHECK(f.control.start(q).code == SIRIUS_INVALID_STATE);
+}
+TEST_CASE("native numeric owner survives producer cancellation during cleanup", "[native_control]")
+{
+  for (auto error : {sirius::mo_decimal::decimal_error::out_of_range,
+                     sirius::mo_decimal::decimal_error::invalid_input}) {
+    fixture f;
+    auto q     = f.create();
+    auto input = std::make_shared<native_input>(
+      1, std::vector<sirius_input_column>{{23, 0, 0, 0}}, q->stop.get_token(), q->deadline);
+    q->inputs->reads.push_back(input);
+    f.record->numeric = error;
+    f.record->cleanup = [input] {
+      input->stop(SIRIUS_CANCELLED, "producer cancellation after numeric failure");
+    };
+    REQUIRE(f.control.prepare(q, 10s).code == SIRIUS_OK);
+    REQUIRE(f.control.start(q).code == SIRIUS_OK);
+    auto expected = error == sirius::mo_decimal::decimal_error::out_of_range
+                      ? SIRIUS_NUMERIC_OUT_OF_RANGE
+                      : SIRIUS_NUMERIC_INVALID_INPUT;
+    CHECK(f.control.wait(q, 10s).code == expected);
+    CHECK(input->outcome().code == SIRIUS_CANCELLED);
+    CHECK(f.record->destroyed == 1);
+    CHECK(f.control.close_query(q, 10s).code == SIRIUS_OK);
+  }
 }
 
 TEST_CASE("prepared admission can remain explicitly non-startable", "[native_control]")

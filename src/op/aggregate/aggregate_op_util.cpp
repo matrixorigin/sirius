@@ -22,6 +22,7 @@
 #include "expression/ast/node.hpp"
 #include "helper/numeric_narrowing.hpp"
 #include "sirius/exception.hpp"
+#include "numeric/decimal_aggregate_layout.hpp"
 
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/reduction.hpp>
@@ -93,6 +94,7 @@ CudfAggregateDefinitions convert_duckdb_aggregates_to_cudf(
   const duckdb::vector<std::unique_ptr<sirius::ast::node>>& expressions)
 {
   CudfAggregateDefinitions result;
+  result.exact_layout = mo_decimal::make_aggregate_layout(groups_p, expressions);
 
   // 1. Extract group_idx from groups_p
   for (const auto& group : groups_p) {
@@ -101,6 +103,8 @@ CudfAggregateDefinitions convert_duckdb_aggregates_to_cudf(
     result.group_idx.push_back(static_cast<int>(ref.column_index));
     result.local_types.push_back(group->return_type());
   }
+
+  if (result.exact_layout) return result;
 
   // 2. Extract aggregates (cudf::aggregation::Kind) from expressions
   for (const auto& aggregate : expressions) {

@@ -6,6 +6,10 @@ This is the first of the two native integration increments approved for
 merged Sirius #25 and importer #4. The semantic contract remains the approved
 MO #29449 document blob `42a89f09a1d168d02b9583cb3ea7b4de6dbb5634`.
 
+This document records the Native A boundary and its historical measurements.
+[Native B](mo-exact-decimal-integration.md) supersedes the exposure boundary
+below with complete embedded preparation, aggregates, keys and capability 16u.
+
 ## Contract and ownership
 
 Physical coefficient width, declared precision, scale, and nullability survive
