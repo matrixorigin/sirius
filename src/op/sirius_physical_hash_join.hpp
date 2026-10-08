@@ -519,6 +519,7 @@ class sirius_physical_hash_join : public sirius_physical_partition_consumer_oper
     bool cast_right = false;
     cudf::data_type left_target_type{cudf::type_id::EMPTY};
     cudf::data_type right_target_type{cudf::type_id::EMPTY};
+    mo_decimal::decimal_type left_exact{}, right_exact{};
   };
 
  protected:

@@ -39,6 +39,7 @@
 #include "helper/type_conversions.hpp"
 #include "io/uri_parser.hpp"
 #include "log/logging.hpp"
+#include "numeric/decimal_types.hpp"
 #include "op/dynamic_filter/sirius_dynamic_filter.hpp"
 #include "op/scan/duckdb_native_gpu_ingestible.hpp"
 #include "op/scan/iceberg_gpu_ingestible.hpp"
@@ -117,6 +118,8 @@ std::vector<std::string> resolve_parquet_scan_file_paths(
 namespace {
 bool is_nested_logical_type(duckdb::LogicalType const& type)
 {
+  if (auto exact = mo_decimal::from_duckdb_type(type); exact && exact->is_mo_decimal())
+    return false;
   auto const id = type.id();
   return id == duckdb::LogicalTypeId::STRUCT || id == duckdb::LogicalTypeId::LIST ||
          id == duckdb::LogicalTypeId::MAP;
@@ -616,7 +619,9 @@ void wrap_hash_group_by(duckdb::unique_ptr<sirius::op::sirius_physical_operator>
     bool const has_supported_count_distinct_layout =
       grouped.has_count_distinct && !grouped.has_avg && !hgb_ptr->has_physical_overrides() &&
       hgb_ptr->types.size() == grouped.group_idx.size() + grouped.aggregate_slots.size();
-    if (has_supported_count_distinct_layout) {
+    if (grouped.exact_layout) {
+      hgb_ptr->types = grouped.get_local_output_types();
+    } else if (has_supported_count_distinct_layout) {
       hgb_ptr->types = grouped.get_count_distinct_local_output_types();
     }
 

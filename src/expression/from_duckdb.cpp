@@ -16,6 +16,7 @@
 
 #include "expression/ast/from_duckdb.hpp"
 
+#include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
 
 // sirius
@@ -115,6 +116,34 @@ std::unique_ptr<node> translate_comparison(duckdb::BoundComparisonExpression con
   auto left  = from_duckdb(*expr.left);
   auto right = from_duckdb(*expr.right);
   if (!left || !right) { return nullptr; }
+  if (left->return_type().is_mo_decimal() || right->return_type().is_mo_decimal()) {
+    std::optional<mo_decimal::decimal_op> op;
+    using T = duckdb::ExpressionType;
+    switch (expr.GetExpressionType()) {
+      case T::COMPARE_EQUAL: op = mo_decimal::decimal_op::equal; break;
+      case T::COMPARE_NOTEQUAL: op = mo_decimal::decimal_op::not_equal; break;
+      case T::COMPARE_LESSTHAN: op = mo_decimal::decimal_op::less; break;
+      case T::COMPARE_LESSTHANOREQUALTO: op = mo_decimal::decimal_op::less_equal; break;
+      case T::COMPARE_GREATERTHAN: op = mo_decimal::decimal_op::greater; break;
+      case T::COMPARE_GREATERTHANOREQUALTO: op = mo_decimal::decimal_op::greater_equal; break;
+      default: break;
+    }
+    if (op) {
+      auto result = sirius::from_duckdb(expr.return_type);
+      // Join construction/cloning introduces ordinary comparison nodes, whose
+      // Boolean type has no nullability carrier. Their strictness follows the
+      // already validated exact key descriptors. Public scalar markers retain
+      // their original immutable binding and declared output type instead.
+      if (!result.nullability())
+        result = result.with_nullability(left->return_type().nullability() == 2 ||
+                                         right->return_type().nullability() == 2);
+      std::vector<std::unique_ptr<node>> arguments;
+      arguments.push_back(std::move(left));
+      arguments.push_back(std::move(right));
+      return std::make_unique<node>(
+        function_call{mo_decimal::function(*op), std::move(arguments), result});
+    }
+  }
   return std::make_unique<node>(comparison{
     /*op=*/sirius::from_duckdb(expr.GetExpressionType()),
     /*left=*/std::move(left),
@@ -203,6 +232,7 @@ std::unique_ptr<node> translate_aggregate(duckdb::BoundAggregateExpression const
 {
   auto agg_id_opt = sirius::from_duckdb_aggregate_name(aggr.function.name);
   if (!agg_id_opt.has_value()) { return nullptr; }
+  if (mo_decimal::is_decimal_aggregate(*agg_id_opt)) mo_decimal::validate_bound_aggregate(aggr);
   auto arguments = translate_children(aggr.children);
   if (!arguments) { return nullptr; }
   auto return_type = sirius::from_duckdb(aggr.return_type);

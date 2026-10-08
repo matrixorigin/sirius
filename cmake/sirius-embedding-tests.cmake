@@ -1,8 +1,10 @@
 # Embedding control tests need neither a GPU nor a DuckDB runtime. Keep them
 # independently runnable from the linked ABI and GPU integration tests.
 add_executable(
-  sirius_exact_decimal_unittest test/cpp/exec/execution_evidence_unittest.cpp
-                                test/cpp/embedding/test_exact_decimal.cpp)
+  sirius_exact_decimal_unittest
+  test/cpp/exec/execution_evidence_unittest.cpp
+  test/cpp/embedding/test_exact_decimal.cpp
+  test/cpp/embedding/test_decimal_aggregate.cpp)
 target_compile_features(sirius_exact_decimal_unittest PRIVATE cxx_std_20)
 target_include_directories(
   sirius_exact_decimal_unittest PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
@@ -45,6 +47,17 @@ target_include_directories(
           "${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait")
 target_link_libraries(sirius_native_result_integration PRIVATE Sirius::embed
                                                                Threads::Threads)
+add_executable(
+  sirius_native_numeric_unittest test/cpp/exec/execution_evidence_unittest.cpp
+                                 test/cpp/embedding/test_native_numeric.cpp)
+target_compile_features(sirius_native_numeric_unittest PRIVATE cxx_std_20)
+target_include_directories(
+  sirius_native_numeric_unittest
+  PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party"
+          "${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait")
+target_link_libraries(sirius_native_numeric_unittest PRIVATE Sirius::embed
+                                                             Threads::Threads)
 
 add_executable(
   sirius_native_binding_unittest
@@ -76,6 +89,7 @@ add_executable(
   test/cpp/embedding/test_native_result_codec.cpp
   test/cpp/embedding/test_exact_decimal_gpu.cpp
   test/cpp/embedding/test_decimal_expression_gpu.cpp
+  test/cpp/embedding/test_decimal_aggregate_gpu.cpp
   test/cpp/embedding/test_tae_gpu.cpp
   src/embedding/c_api.cpp)
 target_compile_features(sirius_native_gpu_unittest PRIVATE cxx_std_20)

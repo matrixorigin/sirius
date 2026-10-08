@@ -18,6 +18,7 @@
 
 #include "data/data_batch_utils.hpp"
 #include "helper/numeric_narrowing.hpp"
+#include "numeric/decimal_aggregate_gpu.hpp"
 
 #include <cudf/partitioning.hpp>
 
@@ -33,7 +34,8 @@ std::vector<std::shared_ptr<cucascade::data_batch>> gpu_partition_impl::hash_par
   int num_partitions,
   ::cuda::stream_ref stream,
   cucascade::memory::memory_space& memory_space,
-  const telemetry::batch_telemetry_info& telemetry_info)
+  const telemetry::batch_telemetry_info& telemetry_info,
+  const std::vector<mo_decimal::decimal_type>& exact_types)
 {
   // Sanity check.
   if (num_partitions < 2) {
@@ -54,8 +56,22 @@ std::vector<std::shared_ptr<cucascade::data_batch>> gpu_partition_impl::hash_par
     all_col_views.push_back(input_table.column(i));
   }
   std::vector<int> effective_key_idx = partition_key_idx;
+  if (!exact_types.empty() && exact_types.size() != partition_key_idx.size())
+    throw std::invalid_argument("MO partition exact-key descriptors do not match keys");
+  owned_cast_cols.reserve(partition_key_idx.size() + partition_key_cast_types.size());
+  for (size_t i = 0; i < exact_types.size(); ++i)
+    if (exact_types[i].bits) {
+      auto key             = mo_decimal::make_equality_key(input_table.column(partition_key_idx[i]),
+                                               exact_types[i],
+                                               stream,
+                                               memory_space.get_default_allocator());
+      effective_key_idx[i] = static_cast<int>(all_col_views.size());
+      all_col_views.push_back(key->view());
+      owned_cast_cols.push_back(std::move(key));
+    }
   for (size_t i = 0; i < partition_key_cast_types.size(); i++) {
-    if (partition_key_cast_types[i].id() != cudf::type_id::EMPTY) {
+    if ((exact_types.empty() || !exact_types[i].bits) &&
+        partition_key_cast_types[i].id() != cudf::type_id::EMPTY) {
       auto cast_col = sirius::cast_through_rep(
         input_table.column(partition_key_idx[i]), partition_key_cast_types[i], stream);
       effective_key_idx[i] = static_cast<int>(all_col_views.size());

@@ -1,5 +1,8 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "embedding/control.hpp"
+#include "numeric/decimal_aggregate_bind.hpp"
+#include "numeric/decimal_functions.hpp"
+#include "numeric/decimal_import.hpp"
 #include "substrait/algebra.pb.h"
 #include "substrait/plan.pb.h"
 
@@ -13,6 +16,11 @@
 namespace sirius::embedding {
 namespace {
 constexpr std::string_view prefix = "__sirius_embedded_v1";
+struct numeric_profile {
+  bool exact{};
+  std::vector<uint32_t> types;
+  std::unordered_set<uint32_t> functions;
+};
 
 uint64_t binding_id(std::string const& text)
 {
@@ -80,8 +88,19 @@ bool supported_aggregate_function(std::string const& name)
   return supported.contains(normalized_function(name));
 }
 
-bool read_type_matches(substrait::Type const& type, owned_column const& column)
+bool read_type_matches(substrait::Type const& type,
+                       owned_column const& column,
+                       numeric_profile const& profile)
 {
+  if (profile.exact && (column.oid == 32 || column.oid == 33 || column.oid == 34)) {
+    if (!type.has_user_defined()) return false;
+    auto logical = mo_decimal::import_result_type(type, profile.types);
+    auto decimal = logical.mo_decimal_type();
+    return decimal.bits == (column.oid == 32   ? 64
+                            : column.oid == 33 ? 128
+                                               : 256) &&
+           decimal.precision == column.width && decimal.scale == column.scale;
+  }
   using Kind = substrait::Type::KindCase;
   switch (column.oid) {
     case 10: return type.kind_case() == Kind::kBool;
@@ -107,8 +126,11 @@ bool read_type_matches(substrait::Type const& type, owned_column const& column)
   }
 }
 
-bool supported_embedded_type(substrait::Type const& type)
+bool supported_embedded_type(substrait::Type const& type, numeric_profile const& profile)
 {
+  if (type.has_user_defined()) {
+    return profile.exact && mo_decimal::import_result_type(type, profile.types).is_mo_decimal();
+  }
   using Kind = substrait::Type::KindCase;
   switch (type.kind_case()) {
     case Kind::kBool:
@@ -126,14 +148,18 @@ bool supported_embedded_type(substrait::Type const& type)
       return type.kind_case() != Kind::kPrecisionTimestamp ||
              type.precision_timestamp().precision() == 6;
     case Kind::kDecimal:
-      return type.decimal().precision() > 0 && type.decimal().precision() <= 38 &&
+      return !profile.exact && type.decimal().precision() > 0 && type.decimal().precision() <= 38 &&
              type.decimal().scale() >= 0 && type.decimal().scale() <= type.decimal().precision();
     default: return false;
   }
 }
 
-bool supported_literal(substrait::Expression_Literal const& literal)
+bool supported_literal(substrait::Expression_Literal const& literal, numeric_profile const& profile)
 {
+  if (literal.has_user_defined())
+    return profile.exact &&
+           std::binary_search(
+             profile.types.begin(), profile.types.end(), literal.user_defined().type_reference());
   using Literal = substrait::Expression_Literal;
   switch (literal.literal_type_case()) {
     case Literal::kNull:
@@ -146,8 +172,9 @@ bool supported_literal(substrait::Expression_Literal const& literal)
     case Literal::kDate:
     case Literal::kVarChar: return true;
     case Literal::kDecimal:
-      return literal.decimal().value().size() == 16 && literal.decimal().precision() > 0 &&
-             literal.decimal().precision() <= 38 && literal.decimal().scale() >= 0 &&
+      return !profile.exact && literal.decimal().value().size() == 16 &&
+             literal.decimal().precision() > 0 && literal.decimal().precision() <= 38 &&
+             literal.decimal().scale() >= 0 &&
              literal.decimal().scale() <= literal.decimal().precision();
     default: return false;
   }
@@ -172,17 +199,23 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
                      int relation_ordinal,
                      query_state const& query,
                      std::set<uint64_t>& reads,
-                     std::unordered_map<uint32_t, std::string> const& functions)
+                     std::unordered_map<uint32_t, std::string> const& functions,
+                     numeric_profile const& profile)
 {
   auto const name = message.GetDescriptor()->full_name();
   if (name == "substrait.Type") {
-    if (!supported_embedded_type(static_cast<substrait::Type const&>(message)))
+    if (!supported_embedded_type(static_cast<substrait::Type const&>(message), profile))
       throw failure(SIRIUS_UNSUPPORTED, "unsupported Substrait type in embedded plan");
   } else if (name == "substrait.Expression.Literal") {
-    if (!supported_literal(static_cast<substrait::Expression_Literal const&>(message)))
+    if (!supported_literal(static_cast<substrait::Expression_Literal const&>(message), profile))
       throw failure(SIRIUS_UNSUPPORTED, "unsupported Substrait literal in embedded plan");
   } else if (name == "substrait.Rel") {
     auto const& rel = static_cast<substrait::Rel const&>(message);
+    if (rel.has_aggregate())
+      for (auto const& measure : rel.aggregate().measures())
+        if (measure.has_filter() &&
+            profile.functions.contains(measure.measure().function_reference()))
+          throw failure(SIRIUS_UNSUPPORTED, "MO aggregate filters are unsupported");
     switch (rel.rel_type_case()) {
       case substrait::Rel::kRead:
       case substrait::Rel::kFilter:
@@ -245,7 +278,11 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
   } else if (name == "substrait.Expression.ScalarFunction") {
     auto const& function = static_cast<substrait::Expression_ScalarFunction const&>(message);
     auto found           = functions.find(function.function_reference());
-    if (found == functions.end() || !supported_scalar_function(found->second))
+    auto exact           = found == functions.end() ? std::optional<function_id>{}
+                                                    : from_duckdb_function_name("__sirius_" + found->second);
+    bool numeric         = exact && mo_decimal::is_decimal_function(*exact) &&
+                   profile.functions.contains(function.function_reference());
+    if (found == functions.end() || (!numeric && !supported_scalar_function(found->second)))
       throw failure(SIRIUS_UNSUPPORTED, "unsupported scalar function in embedded plan");
     auto const normalized = normalized_function(found->second);
     static const std::unordered_set<std::string> extract_fields{"year",
@@ -268,7 +305,11 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
   } else if (name == "substrait.AggregateFunction") {
     auto const& function = static_cast<substrait::AggregateFunction const&>(message);
     auto found           = functions.find(function.function_reference());
-    if (found == functions.end() || !supported_aggregate_function(found->second))
+    auto exact           = found == functions.end() ? std::optional<aggregate_id>{}
+                                                    : from_duckdb_aggregate_name("__sirius_" + found->second);
+    bool numeric         = exact && mo_decimal::is_decimal_aggregate(*exact) &&
+                   profile.functions.contains(function.function_reference());
+    if (found == functions.end() || (!numeric && !supported_aggregate_function(found->second)))
       throw failure(SIRIUS_UNSUPPORTED, "unsupported aggregate function in embedded plan");
     for (auto const& argument : function.arguments())
       if (!argument.has_value())
@@ -301,7 +342,8 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
       auto actual_nullability   = read_nullability(actual);
       auto expected_nullability = expected.nullable ? substrait::Type::NULLABILITY_NULLABLE
                                                     : substrait::Type::NULLABILITY_REQUIRED;
-      if (!read_type_matches(actual, expected) || actual_nullability != expected_nullability)
+      if (!read_type_matches(actual, expected, profile) ||
+          actual_nullability != expected_nullability)
         throw failure(SIRIUS_INVALID_ARGUMENT, "plan read column type does not match its binding");
     }
   } else if (name == "substrait.ReferenceRel") {
@@ -326,10 +368,11 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
                         relation_ordinal,
                         query,
                         reads,
-                        functions);
+                        functions,
+                        profile);
     } else {
       inspect_message(
-        reflection->GetMessage(message, field), relation_ordinal, query, reads, functions);
+        reflection->GetMessage(message, field), relation_ordinal, query, reads, functions, profile);
     }
   }
 }
@@ -345,9 +388,34 @@ void validate_embedded_plan(std::string_view bytes, query_state const& query)
       plan.version().minor_number() != 78)
     throw failure(SIRIUS_UNSUPPORTED, "embedded plans require Substrait version 0.78");
   std::unordered_map<uint32_t, std::string> functions;
+  numeric_profile profile;
+  std::unordered_set<uint32_t> numeric_uris;
+  for (auto const& uri : plan.extension_urns())
+    if (uri.urn() == mo_decimal::extension_uri) {
+      profile.exact = true;
+      numeric_uris.insert(uri.extension_urn_anchor());
+    }
+  for (auto const& extension : plan.extensions())
+    if (extension.has_extension_type()) {
+      auto const& type = extension.extension_type();
+      if (numeric_uris.contains(type.extension_urn_reference()) &&
+          type.name() == "mo_exact_decimal")
+        profile.types.push_back(type.type_anchor());
+    }
+  std::sort(profile.types.begin(), profile.types.end());
+  if (profile.exact)
+    for (auto const& binding : query.bindings)
+      if (binding.source_kind != SIRIUS_READ_MO)
+        throw failure(SIRIUS_UNSUPPORTED, "exact decimal v1 requires MO readers");
+  if (profile.exact)
+    for (auto const& output : query.contract->outputs)
+      if (output.oid == 34 && output.width > 65)
+        throw failure(SIRIUS_UNSUPPORTED, "public Decimal256 precision exceeds 65");
   for (auto const& extension : plan.extensions()) {
     if (!extension.has_extension_function()) continue;
     auto const& mapping = extension.extension_function();
+    if (numeric_uris.contains(mapping.extension_urn_reference()))
+      profile.functions.insert(mapping.function_anchor());
     if (!functions.emplace(mapping.function_anchor(), mapping.name()).second)
       throw failure(SIRIUS_INVALID_ARGUMENT, "duplicate Substrait function anchor");
   }
@@ -366,7 +434,7 @@ void validate_embedded_plan(std::string_view bytes, query_state const& query)
       throw failure(SIRIUS_INVALID_ARGUMENT, "plan output name does not match query contract");
   std::set<uint64_t> reads;
   for (int i = 0; i < plan.relations_size(); ++i)
-    inspect_message(plan.relations(i), i, query, reads, functions);
+    inspect_message(plan.relations(i), i, query, reads, functions, profile);
   if (reads.size() != query.bindings.size())
     throw failure(SIRIUS_INVALID_ARGUMENT, "registered and planned read binding sets differ");
 }

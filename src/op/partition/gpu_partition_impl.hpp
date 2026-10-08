@@ -65,7 +65,8 @@ class gpu_partition_impl {
     int num_partitions,
     ::cuda::stream_ref stream,
     cucascade::memory::memory_space& memory_space,
-    const telemetry::batch_telemetry_info& telemetry_info = {});
+    const telemetry::batch_telemetry_info& telemetry_info    = {},
+    const std::vector<mo_decimal::decimal_type>& exact_types = {});
 
   /// Overload without cast types (all keys hashed as-is). Kept for backward compatibility.
   static std::vector<std::shared_ptr<cucascade::data_batch>> hash_partition(
