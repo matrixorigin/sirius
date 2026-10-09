@@ -10,10 +10,39 @@
 #include "numeric/exact_decimal.hpp"
 
 #include <catch.hpp>
+#include <duckdb/main/relation.hpp>
 #include <duckdb/planner/expression/bound_cast_expression.hpp>
 #include <duckdb/planner/expression/bound_constant_expression.hpp>
 
 using namespace sirius;
+
+TEST_CASE("MO opaque carriers preserve following SQL root columns", "[decimal_import]")
+{
+  decimal_fixture::importer fixture;
+  for (uint16_t bits : {64, 128, 256}) {
+    mo_decimal::decimal_type input{bits, 9, 2}, output{bits, 15, 2};
+    auto plan = decimal_fixture::plan(
+      "mo_decimal_cast", decimal_fixture::type(output), {decimal_fixture::literal(input, 125)});
+    auto root = plan.mutable_relations(0)->mutable_root();
+    root->add_names("after");
+    auto project = root->mutable_input()->mutable_project();
+    project->mutable_common()->mutable_emit()->add_output_mapping(2);
+    project->add_expressions()->mutable_literal()->set_i64(42);
+    auto bytes   = plan.SerializeAsString();
+    auto handler = mo_decimal::make_import_handler(bytes);
+    CHECK(handler->IsOpaqueType(to_duckdb(logical_type::make_mo_decimal(output, false))));
+    CHECK_FALSE(
+      handler->IsOpaqueType(duckdb::LogicalType::STRUCT({{"v", duckdb::LogicalType::BIGINT}})));
+    duckdb::SubstraitToDuckDB converter(fixture.connection.context, bytes, false, false, handler);
+    auto relation       = converter.TransformPlan();
+    auto const& columns = relation->Columns();
+    REQUIRE(columns.size() == 2);
+    CHECK(columns[0].GetName() == "exact");
+    CHECK(columns[1].GetName() == "after");
+    CHECK(from_duckdb(columns[0].GetType()) == logical_type::make_mo_decimal(output, false));
+    CHECK(columns[1].GetType() == duckdb::LogicalType::BIGINT);
+  }
+}
 
 TEST_CASE("MO import carriers retain width precision scale and nullability", "[decimal_import]")
 {

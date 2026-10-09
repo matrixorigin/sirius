@@ -18,6 +18,9 @@ The first type owner is the validated import descriptor. Ordinary DuckDB
 decimal inference cannot substitute a narrower carrier. Decimal64/128 use
 tagged BIGINT/HUGEINT DuckDB carriers; Decimal256 uses the signed-high/unsigned
 low limb STRUCT introduced by #25. Sirius retains a distinct MO decimal type.
+The scoped importer marks canonical exact-decimal carriers as opaque when
+assigning SQL root names. Decimal256's private limbs consume no additional
+headings; ordinary SQL STRUCT fields retain their usual flattened names.
 
 The private alias records the descriptor and is validated against the complete
 physical carrier on conversion. It is internal binding metadata, not a new
