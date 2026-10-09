@@ -13,6 +13,7 @@
 #include <duckdb/planner/expression/bound_cast_expression.hpp>
 #include <duckdb/planner/expression/bound_columnref_expression.hpp>
 #include <duckdb/planner/expression/bound_comparison_expression.hpp>
+#include <duckdb/planner/expression/bound_constant_expression.hpp>
 #include <duckdb/planner/expression/bound_function_expression.hpp>
 #include <duckdb/planner/expression/bound_operator_expression.hpp>
 #include <duckdb/planner/expression_iterator.hpp>
@@ -603,12 +604,34 @@ void rewrite_exact_comparisons(duckdb::unique_ptr<duckdb::LogicalOperator>& plan
     });
   if (plan->type == duckdb::LogicalOperatorType::LOGICAL_ANY_JOIN) {
     auto& join = plan->Cast<duckdb::LogicalAnyJoin>();
-    plan       = duckdb::LogicalComparisonJoin::CreateJoin(context,
-                                                     join.join_type,
-                                                     duckdb::JoinRefType::REGULAR,
-                                                     std::move(join.children[0]),
-                                                     std::move(join.children[1]),
-                                                     std::move(join.condition));
+    if (join.condition->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT &&
+        join.condition->return_type.id() == duckdb::LogicalTypeId::BOOLEAN &&
+        !join.condition->Cast<duckdb::BoundConstantExpression>().value.IsNull() &&
+        join.condition->Cast<duckdb::BoundConstantExpression>().value.GetValue<bool>()) {
+      // Exact plans skip DuckDB's ordinary optimizer. JOIN ON true otherwise
+      // remains an unsupported ANY_JOIN. Equal constant keys use the existing
+      // GPU join, retaining multiplicity and outer NULLs even for empty sides.
+      auto replacement = duckdb::make_uniq<duckdb::LogicalComparisonJoin>(join.join_type);
+      duckdb::JoinCondition condition;
+      condition.comparison = duckdb::ExpressionType::COMPARE_EQUAL;
+      condition.left =
+        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1));
+      condition.right =
+        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1));
+      replacement->conditions.push_back(std::move(condition));
+      replacement->children             = std::move(join.children);
+      replacement->left_projection_map  = std::move(join.left_projection_map);
+      replacement->right_projection_map = std::move(join.right_projection_map);
+      replacement->mark_index           = join.mark_index;
+      plan                              = std::move(replacement);
+    } else {
+      plan = duckdb::LogicalComparisonJoin::CreateJoin(context,
+                                                       join.join_type,
+                                                       duckdb::JoinRefType::REGULAR,
+                                                       std::move(join.children[0]),
+                                                       std::move(join.children[1]),
+                                                       std::move(join.condition));
+    }
   }
   if (plan->type == duckdb::LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
     auto& join = plan->Cast<duckdb::LogicalComparisonJoin>();

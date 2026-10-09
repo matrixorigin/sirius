@@ -254,6 +254,20 @@ evaluate_result expression_evaluator::evaluate(sirius::ast::unary_op const& alt,
       "[expression_evaluator] evaluate called on an unsupported TRY operator expression.");
   }
 
+  if ((alt.op == sirius::ast::unary_op::kind::op_is_null ||
+       alt.op == sirius::ast::unary_op::kind::op_is_not_null) &&
+      alt.child->return_type().is_mo_decimal()) {
+    // cuDF AST unary operators cannot consume MO's exact decimal carriers
+    // (Decimal256 is a private STRUCT). SQL nullness is the canonical
+    // top-level mask, independent of coefficient limbs and physical width.
+    auto child  = evaluate(*alt.child, evaluation_mode::MATERIALIZE);
+    auto result = alt.op == sirius::ast::unary_op::kind::op_is_null
+                    ? cudf::is_null(child.get_column_view(), _stream, _mr)
+                    : cudf::is_valid(child.get_column_view(), _stream, _mr);
+    if (mode == evaluation_mode::AST) return materialize_as_ast_column(std::move(result));
+    return evaluate_result(std::move(result));
+  }
+
   auto const ast_op_count = alt.cudf_ast_op_count();
 
   if (_strategy != expression_evaluator_strategy::MATERIALIZE &&
