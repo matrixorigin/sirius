@@ -635,6 +635,106 @@ TEST_CASE("production exact join keys and outer NULLs preserve values across sca
     CHECK(missing == (outer ? 1 : 0));
   }
 }
+TEST_CASE("production exact true joins preserve multiplicity payloads and empty outer sides",
+          "[native_numeric]")
+{
+  engine engine;
+  decimal_type domain{256, 65, 0};
+  coefficient high;
+  high.words[4] = 1;  // 2^128: passthrough must retain the high limbs.
+  for (auto kind : {substrait::JoinRel::JOIN_TYPE_INNER,
+                    substrait::JoinRel::JOIN_TYPE_LEFT,
+                    substrait::JoinRel::JOIN_TYPE_RIGHT,
+                    substrait::JoinRel::JOIN_TYPE_OUTER}) {
+    for (bool left_empty : {false, true}) {
+      for (bool right_empty : {false, true}) {
+        INFO("kind=" << kind << " left_empty=" << left_empty << " right_empty=" << right_empty);
+        plan_case plan(domain, domain, "mo_decimal_equal", false, true);
+        auto project =
+          plan.plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project();
+        project->clear_expressions();
+        *project->add_expressions() = field(1);
+        project->mutable_common()->mutable_emit()->set_output_mapping(0, 2);
+        auto read              = project->input();
+        auto join              = project->mutable_input()->mutable_join();
+        *join->mutable_left()  = read;
+        *join->mutable_right() = read;
+        join->mutable_right()->mutable_read()->mutable_named_table()->set_names(1, "2");
+        join->set_type(kind);
+        join->mutable_expression()->mutable_literal()->set_boolean(true);
+        query run(engine, plan);
+        run.register_extra(domain, true);
+        auto status = run.prepare();
+        INFO(run.prepare_error);
+        REQUIRE(status == SIRIUS_OK);
+        run.publish(
+          plan,
+          left_empty ? std::vector<coefficient>{} : std::vector<coefficient>{small(1), small(2)});
+        run.write(
+          run.extra_inputs[0],
+          domain,
+          right_empty ? std::vector<coefficient>{} : std::vector<coefficient>{high, high, small(0)},
+          !right_empty);
+        std::vector<bool> nulls;
+        auto values = run.results(domain.bytes(), &nulls);
+        bool preserve_left =
+          kind == substrait::JoinRel::JOIN_TYPE_LEFT || kind == substrait::JoinRel::JOIN_TYPE_OUTER;
+        bool preserve_right = kind == substrait::JoinRel::JOIN_TYPE_RIGHT ||
+                              kind == substrait::JoinRel::JOIN_TYPE_OUTER;
+        size_t rows  = left_empty || right_empty ? 0 : 6;
+        size_t valid = left_empty || right_empty ? 0 : 4;
+        if (right_empty && !left_empty && preserve_left) rows = 2;
+        if (left_empty && !right_empty && preserve_right) {
+          rows  = 3;
+          valid = 2;
+        }
+        REQUIRE(values.size() == rows);
+        size_t observed_valid = 0;
+        for (size_t i = 0; i < values.size(); ++i) {
+          if (nulls[i]) continue;
+          ++observed_valid;
+          for (int word = 0; word < 8; ++word)
+            CHECK(values[i].words[word] == high.words[word]);
+        }
+        CHECK(observed_valid == valid);
+      }
+    }
+  }
+}
+TEST_CASE("production exact true-join lowering does not admit FALSE or NULL predicates",
+          "[native_numeric]")
+{
+  engine engine;
+  decimal_type domain{256, 65, 0};
+  for (bool null_predicate : {false, true}) {
+    plan_case plan(domain, domain, "mo_decimal_equal", false, true);
+    auto project =
+      plan.plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project();
+    project->clear_expressions();
+    *project->add_expressions() = field(1);
+    project->mutable_common()->mutable_emit()->set_output_mapping(0, 2);
+    auto read              = project->input();
+    auto join              = project->mutable_input()->mutable_join();
+    *join->mutable_left()  = read;
+    *join->mutable_right() = read;
+    join->mutable_right()->mutable_read()->mutable_named_table()->set_names(1, "2");
+    join->set_type(substrait::JoinRel::JOIN_TYPE_LEFT);
+    auto predicate = join->mutable_expression()->mutable_literal();
+    if (null_predicate)
+      predicate->mutable_null()->mutable_bool_()->set_nullability(
+        substrait::Type::NULLABILITY_NULLABLE);
+    else
+      predicate->set_boolean(false);
+    query run(engine, plan);
+    run.register_extra(domain, true);
+    REQUIRE(run.prepare() != SIRIUS_OK);
+    sirius_query_execution_stats stats{sizeof(stats), SIRIUS_ABI_VERSION};
+    sirius_error error{};
+    ok(sirius_query_get_execution_stats(run.handle, &stats, &error), error);
+    CHECK(stats.gpu_tasks_started == 0);
+    CHECK(stats.mo_input_units == 0);
+  }
+}
 TEST_CASE("production Decimal256 ordering retains signed coefficients and NULL position",
           "[native_numeric]")
 {

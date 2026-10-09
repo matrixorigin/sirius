@@ -2,11 +2,13 @@
 #include "decimal_import_fixture.hpp"
 #include "expression/ast/utils.hpp"
 #include "expression_evaluator/expression_evaluator.hpp"
+#include "expression_evaluator/gpu_expression_translator_internal.hpp"
 #include "numeric/decimal_error.hpp"
 #include "numeric/exact_decimal_gpu.hpp"
 #include "sirius_c.h"
 
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 
 #include <rmm/cuda_stream.hpp>
 
@@ -123,6 +125,58 @@ std::unique_ptr<cudf::column> values(decimal_type type,
   return column;
 }
 }  // namespace
+
+TEST_CASE("MO exact null predicates consume canonical validity in every evaluator strategy",
+          "[decimal_import_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto mr = cudf::get_current_device_resource_ref();
+  for (uint16_t bits : {64, 128, 256}) {
+    auto type      = logical_type::make_mo_decimal({bits, 15, 2}, true);
+    auto all_valid = values(type.mo_decimal_type(), stream, mr);
+    auto nullable  = values(type.mo_decimal_type(), stream, mr, true);
+    auto empty     = make_decimal_literal(type.mo_decimal_type(), {}, true, 0, stream, mr);
+    auto slice     = cudf::slice(nullable->view(), {1, 2}, stream);
+    std::vector<cudf::column_view> inputs{
+      all_valid->view(), nullable->view(), slice[0], empty->view()};
+    std::vector<std::vector<int64_t>> nulls{{0, 0}, {0, 1}, {1}, {}};
+    for (auto strategy : {expression_evaluator_strategy::MATERIALIZE,
+                          expression_evaluator_strategy::AST_INTERPRET,
+                          expression_evaluator_strategy::AST_JIT}) {
+      for (bool is_null : {false, true}) {
+        for (bool parent_not : {false, true}) {
+          INFO("bits=" << bits << " strategy=" << int(strategy) << " is_null=" << is_null
+                       << " parent_not=" << parent_not);
+          auto op = is_null ? ast::unary_op::kind::op_is_null : ast::unary_op::kind::op_is_not_null;
+          auto expression = std::make_unique<ast::node>(ast::unary_op{op, reference(0, type)});
+          gpu_expression_translator translator(stream.view(), mr);
+          CHECK_FALSE(translator.translate_expression(*expression).has_value());
+          if (parent_not)
+            expression = std::make_unique<ast::node>(
+              ast::unary_op{ast::unary_op::kind::op_not, std::move(expression)});
+          expression_evaluator evaluator(*expression, mr, stream.view(), strategy);
+          for (std::size_t i = 0; i < inputs.size(); ++i) {
+            auto expected = nulls[i];
+            if (is_null == parent_not)
+              for (auto& value : expected)
+                value = !value;
+            auto result = evaluator.evaluate(cudf::table_view{{inputs[i]}});
+            CHECK(result->view().column(0).type().id() == cudf::type_id::BOOL8);
+            expect(result->view().column(0), 1, expected, stream.view());
+          }
+        }
+      }
+    }
+    for (bool is_null : {false, true}) {
+      auto op = is_null ? ast::unary_op::kind::op_is_null : ast::unary_op::kind::op_is_not_null;
+      ast::node expression(
+        ast::unary_op{op, std::make_unique<ast::node>(ast::constant{sirius::null_value{}, type})});
+      expression_evaluator evaluator(expression, mr, stream.view());
+      auto result = evaluator.evaluate(cudf::table_view{{all_valid->view()}});
+      expect(result->view().column(0), 1, {is_null, is_null}, stream.view());
+    }
+  }
+}
 
 TEST_CASE("MO imported scalar signatures execute on the GPU without coercion",
           "[decimal_import_gpu]")
