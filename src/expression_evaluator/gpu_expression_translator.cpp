@@ -627,6 +627,13 @@ std::optional<expr_ref> gpu_expression_translator::add_expression(
     }
   }
 
+  if ((alt.op == sirius::ast::unary_op::kind::op_is_null ||
+       alt.op == sirius::ast::unary_op::kind::op_is_not_null) &&
+      alt.child->return_type().is_mo_decimal()) {
+    // The evaluator materializes these from the canonical validity mask;
+    // a standalone cuDF AST cannot consume the private exact carriers.
+    return std::nullopt;
+  }
   auto child_expr = add_expression(*alt.child, table_src);
   if (!child_expr) { return std::nullopt; }
 
