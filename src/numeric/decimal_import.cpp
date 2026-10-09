@@ -63,6 +63,11 @@ class importer final : public duckdb::SubstraitExtensionHandler {
 
  public:
   explicit importer(std::vector<uint32_t> anchors) : anchors_(std::move(anchors)) {}
+  bool IsOpaqueType(duckdb::LogicalType const& type) const override
+  {
+    auto exact = from_duckdb_type(type);
+    return exact && exact->is_mo_decimal();
+  }
   bool Handles(duckdb::SubstraitExtensionIdentity const& identity) const override
   {
     return identity.urn == extension_uri;
