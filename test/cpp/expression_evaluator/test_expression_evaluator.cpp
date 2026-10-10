@@ -2633,6 +2633,46 @@ TEST_CASE("native_ast - comparison EQUAL (MATERIALIZE)",
   }
 }
 
+TEST_CASE("native_ast - semantic VARCHAR identity casts retain values and ownership",
+          "[expression_evaluator_ast_native][varchar_identity_cast]")
+{
+  auto* space = get_default_gpu_space();
+  REQUIRE(space != nullptr);
+  auto input =
+    make_input_batch(*space, {cudf::data_type{cudf::type_id::STRING}}, {std::pair<int, int>{1, 5}});
+  auto ro       = input->to_read_only();
+  auto& in_repr = ro.get_data()->cast<gpu_table_representation>();
+  auto tv       = in_repr.get_table_view();
+  auto const varchar = sirius::logical_type::make(sirius::type_id::VARCHAR);
+  auto const expected = copy_string_column_to_host(tv.column(0));
+
+  for (auto strategy : {MAT, INT, JIT}) {
+    auto reference = std::make_unique<sirius::ast::node>(sirius::ast::reference{0, varchar});
+    auto identity = std::make_unique<sirius::ast::node>(
+      sirius::ast::cast{std::move(reference), varchar, false});
+    auto result = run_native_ast(*space, identity.get(), tv, strategy);
+    REQUIRE(result->view().column(0).type().id() == cudf::type_id::STRING);
+    REQUIRE(copy_string_column_to_host(result->view().column(0)) == expected);
+    REQUIRE(result->view().column(0).head<char>() != tv.column(0).head<char>());
+
+    for (std::string value : {std::string{}, std::string{"hello"}, std::string{"界é"}}) {
+      auto literal = std::make_unique<sirius::ast::node>(
+        sirius::ast::constant{sirius::value{value}, varchar});
+      auto cast = std::make_unique<sirius::ast::node>(
+        sirius::ast::cast{std::move(literal), varchar, false});
+      auto strings = run_native_ast(*space, cast.get(), tv, strategy);
+      REQUIRE(copy_string_column_to_host(strings->view().column(0)) ==
+              std::vector<std::string>(tv.num_rows(), value));
+    }
+    auto null = std::make_unique<sirius::ast::node>(
+      sirius::ast::constant{sirius::value{}, varchar});
+    auto cast = std::make_unique<sirius::ast::node>(
+      sirius::ast::cast{std::move(null), varchar, false});
+    auto nulls = run_native_ast(*space, cast.get(), tv, strategy);
+    REQUIRE(nulls->view().column(0).null_count() == tv.num_rows());
+  }
+}
+
 TEST_CASE("native_ast - comparison LESS_THAN (AST_INTERPRET)",
           "[expression_evaluator_ast_native][comparison]")
 {
