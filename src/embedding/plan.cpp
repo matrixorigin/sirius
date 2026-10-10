@@ -376,6 +376,59 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
     }
   }
 }
+// ReferenceRel is inlined by the importer. A single wire ReadRel can therefore
+// become several consumers of the same destructive MO input. Count reachable
+// consumption rather than only declarations, before any native reader starts.
+void inspect_consumption(duckdb::google::protobuf::Message const& message,
+                         substrait::Plan const& plan,
+                         int ordinal,
+                         query_state const& query,
+                         std::set<uint64_t>& consumed,
+                         std::size_t& visited,
+                         int depth)
+{
+  if (++visited > 65536 || depth > 256)
+    throw failure(SIRIUS_UNSUPPORTED, "embedded reference expansion exceeds its bound");
+  auto const name = message.GetDescriptor()->full_name();
+  if (name == "substrait.ReferenceRel") {
+    auto const source = static_cast<substrait::ReferenceRel const&>(message).subtree_ordinal();
+    if (source < 0 || source >= ordinal || !plan.relations(source).has_rel())
+      throw failure(SIRIUS_INVALID_ARGUMENT, "invalid embedded subtree reference");
+    inspect_consumption(
+      plan.relations(source).rel(), plan, source, query, consumed, visited, depth + 1);
+    return;
+  }
+  if (name == "substrait.ReadRel") {
+    auto const& read = static_cast<substrait::ReadRel const&>(message);
+    auto const id    = binding_id(read.named_table().names(1));
+    auto binding = std::find_if(query.bindings.begin(), query.bindings.end(), [id](auto const& b) {
+      return b.binding_id == id;
+    });
+    if (binding != query.bindings.end() && binding->source_kind == SIRIUS_READ_MO &&
+        !consumed.insert(id).second)
+      throw failure(SIRIUS_INVALID_ARGUMENT,
+                    "a destructive MO read binding cannot be consumed through shared references");
+  }
+  auto const* reflection = message.GetReflection();
+  std::vector<const duckdb::google::protobuf::FieldDescriptor*> fields;
+  reflection->ListFields(message, &fields);
+  for (auto const* field : fields) {
+    if (field->cpp_type() != duckdb::google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) continue;
+    if (field->is_repeated()) {
+      for (int i = 0; i < reflection->FieldSize(message, field); ++i)
+        inspect_consumption(reflection->GetRepeatedMessage(message, field, i),
+                            plan,
+                            ordinal,
+                            query,
+                            consumed,
+                            visited,
+                            depth + 1);
+    } else {
+      inspect_consumption(
+        reflection->GetMessage(message, field), plan, ordinal, query, consumed, visited, depth + 1);
+    }
+  }
+}
 }  // namespace
 
 void validate_embedded_plan(std::string_view bytes, query_state const& query)
@@ -437,5 +490,12 @@ void validate_embedded_plan(std::string_view bytes, query_state const& query)
     inspect_message(plan.relations(i), i, query, reads, functions, profile);
   if (reads.size() != query.bindings.size())
     throw failure(SIRIUS_INVALID_ARGUMENT, "registered and planned read binding sets differ");
+  std::set<uint64_t> consumed;
+  std::size_t visited = 0;
+  inspect_consumption(root.input(), plan, plan.relations_size() - 1, query, consumed, visited, 0);
+  for (auto const& binding : query.bindings)
+    if (binding.source_kind == SIRIUS_READ_MO && !consumed.contains(binding.binding_id))
+      throw failure(SIRIUS_INVALID_ARGUMENT,
+                    "registered MO read binding has no reachable consumer");
 }
 }  // namespace sirius::embedding

@@ -53,8 +53,13 @@ using sirius::value;
 
 static_assert(std::is_default_constructible_v<value>,
               "sirius::value must default-construct (NULL is the natural default).");
-static_assert(std::variant_size_v<value> == 21,
-              "sirius::value has exactly 21 alternatives (D-01 — locked ABI).");
+// The original 21 alternatives retain their indexes; merged MO exact support
+// appends its coefficient carrier rather than changing those existing slots.
+static_assert(std::variant_size_v<value> == 22,
+              "sirius::value has exactly 22 alternatives including the MO coefficient.");
+static_assert(
+  std::is_same_v<std::variant_alternative_t<21, value>, sirius::mo_decimal::coefficient>,
+  "The MO exact coefficient must occupy the appended variant slot.");
 
 // ============================================================================
 // Round-trip every supported type_id (CONTEXT.md test plan item 1)

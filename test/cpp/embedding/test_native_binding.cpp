@@ -101,6 +101,44 @@ TEST_CASE("embedded plan admission rejects schema and arbitrary reads", "[native
                     sirius::embedding::failure);
 }
 
+TEST_CASE("embedded shared references cannot replay destructive MO inputs", "[native_binding]")
+{
+  auto query    = bound_query();
+  auto original = one_read();
+  auto plan     = original;
+  plan.clear_relations();
+  *plan.add_relations()->mutable_rel() = original.relations(0).root().input();
+  auto* root                           = plan.add_relations()->mutable_root();
+  root->add_names("c");
+  root->mutable_input()->mutable_reference()->set_subtree_ordinal(0);
+  REQUIRE_NOTHROW(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query));
+
+  auto single = plan;
+  root->add_names("second");
+  query.contract->outputs.push_back({23, 0, 0, false, "second"});
+  root->mutable_input()->Clear();
+  auto* cross = root->mutable_input()->mutable_cross();
+  cross->mutable_left()->mutable_reference()->set_subtree_ordinal(0);
+  cross->mutable_right()->mutable_reference()->set_subtree_ordinal(0);
+  REQUIRE_THROWS_AS(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query),
+                    sirius::embedding::failure);
+
+  // An immutable TAE binding remains replayable through the importer.
+  query.bindings[0].source_kind = SIRIUS_READ_TAE;
+  REQUIRE_NOTHROW(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query));
+
+  // A declared but unreachable destructive producer must not start and block.
+  query             = bound_query();
+  auto second       = query.bindings[0];
+  second.binding_id = 2;
+  query.bindings.push_back(std::move(second));
+  plan = single;
+  *plan.mutable_relations(1)->mutable_root()->mutable_input() =
+    one_read("2").relations(0).root().input();
+  REQUIRE_THROWS_AS(sirius::embedding::validate_embedded_plan(plan.SerializeAsString(), query),
+                    sirius::embedding::failure);
+}
+
 TEST_CASE("embedded admission preserves allowed sort selections and scalar filters",
           "[native_binding]")
 {
