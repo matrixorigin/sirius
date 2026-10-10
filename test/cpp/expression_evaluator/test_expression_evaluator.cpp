@@ -2646,7 +2646,7 @@ TEST_CASE("native_ast - semantic VARCHAR identity casts retain values and owners
   auto const varchar = sirius::logical_type::make(sirius::type_id::VARCHAR);
   auto const expected = copy_string_column_to_host(tv.column(0));
 
-  for (auto strategy : {MAT, INT, JIT}) {
+  for (auto strategy : {MAT, exp_strategy_enum::AST_INTERPRET, exp_strategy_enum::AST_JIT}) {
     auto reference = std::make_unique<sirius::ast::node>(sirius::ast::reference{0, varchar});
     auto identity = std::make_unique<sirius::ast::node>(
       sirius::ast::cast{std::move(reference), varchar, false});
