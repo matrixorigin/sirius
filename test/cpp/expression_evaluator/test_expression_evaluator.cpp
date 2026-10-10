@@ -2653,7 +2653,7 @@ TEST_CASE("native_ast - semantic VARCHAR identity casts retain values and owners
     auto result = run_native_ast(*space, identity.get(), tv, strategy);
     REQUIRE(result->view().column(0).type().id() == cudf::type_id::STRING);
     REQUIRE(copy_string_column_to_host(result->view().column(0)) == expected);
-    REQUIRE(result->view().column(0).head<char>() != tv.column(0).head<char>());
+    REQUIRE(result->view().column(0).child(0).head<char>() != tv.column(0).child(0).head<char>());
 
     for (std::string value : {std::string{}, std::string{"hello"}, std::string{"界é"}}) {
       auto literal = std::make_unique<sirius::ast::node>(
