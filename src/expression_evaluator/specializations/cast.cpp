@@ -89,6 +89,23 @@ evaluate_result expression_evaluator::evaluate(sirius::ast::cast const& alt, eva
     child = evaluate_result(
       cudf::make_column_from_scalar(child.get_scalar(), _input_table.num_rows(), _stream, _mr));
   }
+  // Exact Substrait preparation deliberately retains semantic casts instead
+  // of running DuckDB's ordinary optimizer. VARCHAR -> VARCHAR is an identity
+  // operation, but cuDF's unary cast accepts only fixed-width columns. Keep the
+  // value/validity and give the result an independent owner; no representation
+  // tunnel or conversion of other variable-width types is authorized here.
+  if (alt.kind == sirius::ast::cast_kind::semantic &&
+      alt.target_type.id() == sirius::type_id::VARCHAR &&
+      alt.child->return_type().id() == sirius::type_id::VARCHAR &&
+      child.get_column_view().type().id() == cudf::type_id::STRING) {
+    auto result_column = child.is_owned_column()
+                           ? child.release_column()
+                           : std::make_unique<cudf::column>(child.get_column_view(), _stream, _mr);
+    if (mode == evaluation_mode::AST) {
+      return materialize_as_ast_column(std::move(result_column));
+    }
+    return evaluate_result(std::move(result_column));
+  }
   auto const input = child.get_column_view();
   std::unique_ptr<cudf::column> result_column;
   if (alt.kind == sirius::ast::cast_kind::carrier_restore) {
