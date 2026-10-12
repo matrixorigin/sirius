@@ -28,6 +28,9 @@ struct input_pool {
   virtual std::unique_ptr<input_storage> allocate(std::size_t bytes) = 0;
 };
 class native_input;
+struct input_column_summary {
+  uint64_t chars{0}, nulls{0};
+};
 struct input_batch {
   ~input_batch();
   std::shared_ptr<native_input> owner;
@@ -36,6 +39,10 @@ struct input_batch {
   std::shared_ptr<input_pool> pool;
   std::unique_ptr<input_storage> storage;
   std::vector<sirius_input_vector> columns;
+  std::vector<input_column_summary> summaries;
+  // Logical expansion can exceed size_t for constant vectors. Only bounded
+  // source slices are ever converted to physical allocation sizes.
+  unsigned __int128 expanded_bytes{0};
   uint32_t rows{0};
   std::size_t payload_bytes{0};
   std::size_t charged_bytes{0};
@@ -65,7 +72,8 @@ class native_input : public std::enable_shared_from_this<native_input> {
                clock::time_point deadline,
                std::size_t capacity                   = input_window,
                std::size_t count                      = 128,
-               std::shared_ptr<execution_stats> stats = {});
+               std::shared_ptr<execution_stats> stats = {},
+               std::size_t target_bytes               = input_target);
   void activate(std::shared_ptr<input_pool> pool);
   std::shared_ptr<input_batch> acquire(std::size_t bytes, clock::time_point wait_until);
   void publish(std::shared_ptr<input_batch> const&,
@@ -89,9 +97,11 @@ class native_input : public std::enable_shared_from_this<native_input> {
  private:
   void check_open() const;
   void notify() const;
+  bool ready_locked() const;
   std::stop_token stop_;
   clock::time_point deadline_;
   std::shared_ptr<execution_stats> stats_;
+  std::size_t const target_;
   mutable std::mutex mutex_;
   std::mutex claim_mutex_;
   std::shared_ptr<input_pool> pool_;
@@ -99,7 +109,10 @@ class native_input : public std::enable_shared_from_this<native_input> {
   buffer_budget expanded_{input_window, 128};
   std::deque<std::shared_ptr<input_batch>> queue_;
   uint32_t front_row_{0};
+  unsigned __int128 front_remaining_bytes_{0};
   std::size_t filling_{0};
+  std::size_t capacity_waiters_{0};
+  bool pressure_{false};
   std::atomic<std::size_t> blocked_{0};
   bool eos_{false};
   bool had_rows_{false}, empty_claimed_{false};
