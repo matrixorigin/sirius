@@ -456,6 +456,7 @@ TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs"
       vector.null_bytes   = 8;
       input->publish(batch, 65, {&vector, 1});
       batch.reset();
+      input->finish();
       auto unit = input->claim();
       REQUIRE(unit);
       // Re-materialize the same immutable source, as an OOM retry would.
@@ -538,6 +539,7 @@ TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs"
     auto* inject   = fault.get();
     batch->storage = std::move(fault);
     batch.reset();
+    input->finish();
     auto unit = input->claim();
     REQUIRE(unit);
     REQUIRE_THROWS_WITH(convert_native_input(*unit, input->schema, *gpu, stream.view()),
