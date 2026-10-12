@@ -143,7 +143,8 @@ TEST_CASE("native execution stats aggregate charged MO and result ownership", "[
                                               clock::now() + 5s,
                                               256,
                                               4,
-                                              stats);
+                                              stats,
+                                              140);
   input->activate(pool);
   auto batch = input->acquire(64, clock::now());
   sirius_input_vector vector{};

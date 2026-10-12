@@ -89,6 +89,8 @@ input_batch::~input_batch()
   // Retire physical ownership, then the public gauge, before returned credit
   // wakes a producer that can charge the same window again.
   storage.reset();
+  std::vector<sirius_input_vector>{}.swap(columns);
+  std::vector<input_column_summary>{}.swap(summaries);
   if (stats) stats->mo_input_release(charged_bytes);
   credit.reset();
   if (owner && !published) owner->release_filling();
@@ -128,18 +130,22 @@ native_input::native_input(uint64_t binding,
                            clock::time_point deadline,
                            std::size_t bytes,
                            std::size_t count,
-                           std::shared_ptr<execution_stats> stats)
+                           std::shared_ptr<execution_stats> stats,
+                           std::size_t target_bytes)
   : schema(std::move(columns)),
     id(binding),
     capacity(bytes),
     stop_(stop),
     deadline_(deadline),
     stats_(std::move(stats)),
+    target_(target_bytes),
     budget_(bytes, count),
     cancel_(stop, [this] { this->stop(); })
 {
   validate_input_schema(schema);
   require(bytes <= input_window && count <= 128, "native input limits exceed hard bounds");
+  require(target_ > schema.size() * 68 && target_ <= input_target,
+          "native input target exceeds bounded planning limits");
 }
 void native_input::activate(std::shared_ptr<input_pool> pool)
 {
@@ -166,20 +172,54 @@ std::shared_ptr<input_batch> native_input::acquire(std::size_t bytes, clock::tim
   }
   require(bytes > 0 && bytes <= capacity, "native input lease size outside window");
   auto allocated = pool->rounded(bytes);
+  require(allocated >= bytes, "native pool rounding truncates input lease");
+  if (allocated > capacity)
+    throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native pool rounding exceeds input window");
   // Charge retained descriptors as well as physical pool blocks, before either
   // allocation. Constant/NULL vectors cannot hide metadata outside the window.
-  auto charged = allocated + schema.size() * sizeof(sirius_input_vector);
+  auto charged =
+    allocated + schema.size() * (sizeof(sirius_input_vector) + sizeof(input_column_summary));
   buffer_budget::lease credit;
   auto status = budget_.acquire(charged, stop_, clock::now(), credit);
-  if (status == SIRIUS_TIMEOUT && until > clock::now()) {
-    ++blocked_;
-    if (stats_) stats_->mo_input_blocked();
-    status = budget_.acquire(charged, stop_, std::min(until, deadline_), credit);
+  struct waiter_registration {
+    native_input* owner{nullptr};
+    void reset() noexcept
+    {
+      if (!owner) return;
+      std::lock_guard lock(owner->mutex_);
+      --owner->capacity_waiters_;
+      owner = nullptr;
+    }
+    ~waiter_registration() { reset(); }
+  } waiter;
+  if (status == SIRIUS_TIMEOUT) {
+    const bool wait = until > clock::now();
+    {
+      std::lock_guard lock(mutex_);
+      check_open();
+      // Durable even for a zero-wait acquire: the consumer must be able to
+      // flush before a producer can retry, allocate, or publish another frame.
+      pressure_ = true;
+      if (wait) {
+        ++capacity_waiters_;
+        waiter.owner = this;
+        ++blocked_;
+        if (stats_) stats_->mo_input_blocked();
+      }
+    }
+    notify();
+    if (wait) status = budget_.acquire(charged, stop_, std::min(until, deadline_), credit);
   }
+  waiter.reset();
   if (status != SIRIUS_OK) {
     std::lock_guard lock(mutex_);
     check_open();
     throw failure(status, "native input capacity unavailable");
+  }
+  {
+    std::lock_guard lock(mutex_);
+    check_open();
+    pressure_ = false;  // other active waiters independently keep flushing
   }
   auto batch           = std::make_shared<input_batch>();
   batch->stats         = stats_;
@@ -207,7 +247,9 @@ void native_input::publish(std::shared_ptr<input_batch> const& batch,
   // Caller has exclusive ownership of an unpublished batch. Validation and
   // potentially large scans never hold the queue or coordinator mutex.
   batch->columns.assign(columns.begin(), columns.end());
-  batch->rows = rows;
+  batch->summaries.assign(columns.size(), {});
+  batch->expanded_bytes = schema.empty() ? rows : 0;
+  batch->rows           = rows;
   for (std::size_t k = 0; k < columns.size(); ++k) {
     auto const& c = columns[k];
     require(c.reserved == 0 && c.vector_class <= SIRIUS_VECTOR_NULL, "invalid native vector class");
@@ -223,13 +265,24 @@ void native_input::publish(std::shared_ptr<input_batch> const& batch,
               c.null_bytes <= ((static_cast<uint64_t>(physical_rows) + 63) / 64) * 8,
             "invalid native null bitmap length");
     for (uint32_t r = 0; r < physical_rows; ++r) {
-      require(schema[k].nullable || !batch->is_null(k, r), "NULL in nonnullable native column");
+      auto null = batch->is_null(k, r);
+      require(schema[k].nullable || !null, "NULL in nonnullable native column");
+      batch->summaries[k].nulls += null;
       if (input_string_type(schema[k].oid)) {
         auto [offset, size] = batch->string_range(k, r);
         if (size > input_window - 8)
           throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native row exceeds expanded limit");
+        batch->summaries[k].chars += size;
       }
     }
+    if (c.vector_class != SIRIUS_VECTOR_FLAT) {
+      batch->summaries[k].chars *= rows;
+      batch->summaries[k].nulls *= rows;
+    }
+    batch->expanded_bytes +=
+      static_cast<unsigned __int128>(rows) *
+        (input_string_type(schema[k].oid) ? 5 : 1 + input_element_size(schema[k].oid)) +
+      batch->summaries[k].chars;
   }
   {
     std::lock_guard lock(mutex_);
@@ -269,7 +322,10 @@ void native_input::discard()
   {
     std::lock_guard lock(mutex_);
     dropped.swap(queue_);
-    pool = std::move(pool_);
+    front_row_             = 0;
+    front_remaining_bytes_ = 0;
+    pressure_              = false;
+    pool                   = std::move(pool_);
   }
   dropped.clear();
 }
@@ -294,8 +350,25 @@ void native_input::notify() const
 bool native_input::ready() const
 {
   std::lock_guard lock(mutex_);
-  return error_.code || (eos_ && queue_.empty()) ||
-         (!queue_.empty() && expanded_.inspect().bytes < input_window);
+  return ready_locked();
+}
+bool native_input::ready_locked() const
+{
+  if (error_.code || (eos_ && queue_.empty())) return true;
+  if (queue_.empty()) return false;
+  unsigned __int128 bytes = schema.size() * 68;
+  uint64_t rows           = 0;
+  for (std::size_t i = 0; i < queue_.size(); ++i) {
+    bytes += i == 0 && front_row_ ? front_remaining_bytes_ : queue_[i]->expanded_bytes;
+    rows += queue_[i]->rows - (i == 0 ? front_row_ : 0);
+    if (bytes >= target_ || rows >= INT32_MAX) break;
+  }
+  if (!eos_ && !pressure_ && !capacity_waiters_ && queue_.size() < 128 && bytes < target_ &&
+      rows < INT32_MAX)
+    return false;
+  auto credit = expanded_.inspect();
+  auto needed = static_cast<std::size_t>(std::min<unsigned __int128>(bytes, target_));
+  return credit.leases < 128 && needed <= input_window - credit.bytes;
 }
 bool native_input::exhausted() const
 {
@@ -336,7 +409,8 @@ std::unique_ptr<input_unit> native_input::claim()
   std::unique_lock serial(claim_mutex_, std::try_to_lock);
   if (!serial.owns_lock()) return nullptr;
   std::vector<std::shared_ptr<input_batch>> pending;
-  uint32_t front = 0;
+  uint32_t front                = 0;
+  unsigned __int128 front_bytes = 0;
   {
     std::lock_guard lock(mutex_);
     if (error_.code) {
@@ -352,24 +426,46 @@ std::unique_ptr<input_unit> native_input::claim()
       if (stats_) stats_->mo_input_unit();
       return empty;
     }
+    if (!ready_locked()) return nullptr;
     pending.assign(queue_.begin(), queue_.end());
-    front = front_row_;
+    front       = front_row_;
+    front_bytes = front_remaining_bytes_;
   }
   auto unit = std::make_unique<input_unit>();
   unit->chars.resize(schema.size());
   unit->nulls.resize(schema.size());
   unit->slices.reserve(128);
-  auto available = input_window - expanded_.inspect().bytes;
-  auto limit     = std::min(input_target, available);
+  // Select a unit independently of free credit. A shortage parks the complete
+  // plan instead of turning the last few available bytes into a tiny GPU task.
+  auto limit = target_;
   // Bound per-column validity padding and string offset sentinels as well as
   // row-dependent data. GPU reservations additionally include upload/scratch.
-  unit->bytes = schema.size() * 68;
-  if (available <= unit->bytes) return nullptr;
+  unit->bytes                 = schema.size() * 68;
+  unsigned __int128 remaining = 0;
   // First plan without mutating the queue; allocation/credit failures cannot
   // lose rows. Bounded descriptor fan-in, no eager list of all source units.
   for (auto const& batch : pending) {
     uint32_t begin = unit->slices.empty() ? front : 0;
     uint32_t end   = begin;
+    remaining      = begin ? front_bytes : batch->expanded_bytes;
+    auto terminal  = outcome();
+    if (terminal.code == SIRIUS_NOT_NEEDED) return nullptr;
+    if (terminal.code) throw failure(terminal.code, terminal.message);
+    if (stop_.stop_requested()) throw failure(SIRIUS_CANCELLED, "native query cancelled");
+    if (clock::now() >= deadline_) throw failure(SIRIUS_TIMEOUT, "native query deadline expired");
+    // Publication already inspected these immutable bytes. Whole-frame
+    // coalescing adds summaries rather than rescanning every source row.
+    if (!begin && remaining <= limit - std::min(limit, unit->bytes) &&
+        batch->rows <= INT32_MAX - unit->rows) {
+      for (std::size_t k = 0; k < schema.size(); ++k) {
+        unit->chars[k] += batch->summaries[k].chars;
+        unit->nulls[k] += batch->summaries[k].nulls;
+      }
+      unit->bytes += static_cast<std::size_t>(remaining);
+      unit->rows += batch->rows;
+      remaining = 0;
+      end       = batch->rows;
+    }
     for (; end < batch->rows; ++end) {
       if ((end & 4095u) == 0) {
         auto terminal = outcome();
@@ -385,7 +481,7 @@ std::unique_ptr<input_unit> native_input::claim()
                                                  : 1 + input_element_size(schema[k].oid);
       if (cost > input_window - schema.size() * 68)
         throw failure(SIRIUS_RESOURCE_EXHAUSTED, "native row exceeds expanded limit");
-      if (cost > available - unit->bytes ||
+      if (cost > input_window - unit->bytes ||
           (unit->rows && cost > limit - std::min(limit, unit->bytes)))
         break;
       for (std::size_t k = 0; k < schema.size(); ++k) {
@@ -393,6 +489,7 @@ std::unique_ptr<input_unit> native_input::claim()
         unit->nulls[k] += batch->is_null(k, end);
       }
       unit->bytes += cost;
+      remaining -= cost;
       ++unit->rows;
       if (unit->rows == INT32_MAX) {
         ++end;
@@ -405,8 +502,7 @@ std::unique_ptr<input_unit> native_input::claim()
       break;
   }
   if (unit->slices.empty()) return nullptr;
-  if (expanded_.acquire(unit->bytes, {}, clock::now(), unit->expanded_credit) != SIRIUS_OK)
-    return nullptr;
+  if (expanded_.try_acquire(unit->bytes, unit->expanded_credit) != SIRIUS_OK) return nullptr;
   {
     std::lock_guard lock(mutex_);
     if (error_.code == SIRIUS_NOT_NEEDED) return nullptr;
@@ -418,6 +514,8 @@ std::unique_ptr<input_unit> native_input::claim()
         front_row_ = 0;
       }
     }
+    front_remaining_bytes_ = front_row_ ? remaining : 0;
+    if (queue_.empty()) pressure_ = false;
   }
   if (stats_) stats_->mo_input_unit();
   return unit;

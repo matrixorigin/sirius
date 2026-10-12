@@ -172,12 +172,23 @@ Allocations draw on those reservations, not additional unreserved pinned memory.
 Unused reservations are released during quiescent cleanup; filling/retry owners
 keep their pool reservation alive until their own final release.
 
-The consumer coalesces available batches toward 32 MiB, with at most 128 batch
-slices and 64 MiB expanded data per source unit. Expanded-source credits also
+The consumer collects published batches toward 32 MiB before scheduling a GPU
+source task. An open, smaller input parks until publication reaches the target,
+the 128-slice/row limit is reached, the producer encounters input-credit pressure,
+or EOS arrives. Capacity pressure is published before the producer waits and
+survives a timed-out or zero-wait acquisition. Other active waiters keep partial
+flushing enabled even when one acquisition succeeds. No batching timer is used.
+Immutable expansion, string-byte and NULL summaries are charged with the input
+descriptors; whole-frame claims reuse them without rescanning source rows.
+
+There are at most 128 batch slices and 64 MiB expanded data per source unit.
+Expanded-source credits also
 bound the total outstanding units of a read to 64 MiB / 128 units. Planning
 includes validity padding and string offsets. Constant and variable-width
 expansion is bounded; oversized units split lazily at row boundaries, and an
-unrepresentable single row fails. Producer payloads must already be bounded.
+unrepresentable single row fails. A planned unit waits for sufficient expanded
+credit instead of shrinking to its currently available remainder. Producer
+payloads must already be bounded.
 
 Dequeuing does not release input credit. The scan split retains immutable
 native bytes until conversion and any source retry are safe. Successful decode
@@ -190,7 +201,8 @@ Failed quiescence retains unsafe owners and returns GPU_UNAVAILABLE.
 Native ingestion uses the unified GPU scan operator, but bypasses finite file
 metadata enumeration and cross-query pinned caches. Empty-open input parks
 scheduling without blocking a task-creator/GPU worker. A durable, deduplicated
-wakeup covers publication, EOS, error and returned source credit. Subscriptions
+wakeup covers publication, capacity pressure, EOS, error and returned source
+credit. Both readiness checks and direct claims enforce the batching policy. Subscriptions
 use weak query generations and close before queued/in-flight plan references
 are drained. File-backed scans retain their existing behavior.
 
