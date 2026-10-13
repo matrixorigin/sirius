@@ -1,7 +1,6 @@
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 #include "decimal_import_fixture.hpp"
 #include "expression/ast/node.hpp"
-#include "expression/ast/to_duckdb.hpp"
 #include "expression/ast/utils.hpp"
 #include "expression/value.hpp"
 #include "helper/type_conversions.hpp"
@@ -90,14 +89,14 @@ TEST_CASE("MO import rejects malformed and forged physical carriers", "[decimal_
   REQUIRE_THROWS(logical_type::make_mo_decimal({256, 77, 0}, true));
   auto real                  = to_duckdb(logical_type::make_mo_decimal({256, 15, 2}, true));
   duckdb::LogicalType forged = duckdb::LogicalType::BIGINT;
-  forged.SetAlias(real.GetAlias());
+  forged                     = forged.WithAlias(real.GetAlias());
   REQUIRE_THROWS(from_duckdb(forged));
   for (auto alias : {"__sirius_mo_exact_v1_d_256_15_2_0",
                      "__sirius_mo_exact_v1_d_256_015_2_2",
                      "__sirius_mo_exact_v1_d_256_15_16_2",
                      "__sirius_mo_exact_v1_d_256_15_2_2_extra"}) {
     auto invalid = real;
-    invalid.SetAlias(alias);
+    invalid      = invalid.WithAlias(alias);
     REQUIRE_THROWS(from_duckdb(invalid));
   }
   int64_t value    = 1000;
@@ -122,11 +121,9 @@ TEST_CASE("MO scalar import binds exact types without numeric coercion", "[decim
     REQUIRE(expression->as_function_call().arguments().size() == 2);
     for (auto const& argument : expression->as_function_call().arguments())
       CHECK(argument->return_type() == logical_type::make_mo_decimal(input, false));
-    auto copied        = ast::clone(*expression);
-    auto reconstructed = ast::to_duckdb(*copied);
-    auto roundtrip     = ast::from_duckdb(*reconstructed);
-    CHECK(roundtrip->return_type() == expression->return_type());
-    CHECK(roundtrip->as_function_call().function() == function_id::mo_decimal_add);
+    auto copied = ast::clone(*expression);
+    CHECK(copied->return_type() == expression->return_type());
+    CHECK(copied->as_function_call().function() == function_id::mo_decimal_add);
   }
 }
 
@@ -230,11 +227,10 @@ TEST_CASE("MO aggregate import preserves checked signatures and rejects modifier
       REQUIRE(expression->is_aggregate());
       CHECK(expression->as_aggregate().function() == mo_decimal::aggregate_function(op));
       CHECK(expression->return_type() == logical_type::make_mo_decimal(output, true));
-      auto cloned        = ast::clone(*expression);
-      auto reverse       = ast::to_duckdb(*cloned);
-      auto reconstructed = ast::from_duckdb(*reverse);
-      REQUIRE(reconstructed->is_aggregate());
-      CHECK(reconstructed->return_type() == expression->return_type());
+      auto cloned = ast::clone(*expression);
+      REQUIRE(cloned->is_aggregate());
+      CHECK(cloned->return_type() == expression->return_type());
+      CHECK(cloned->as_aggregate().function() == mo_decimal::aggregate_function(op));
       auto bad = original;
       bad.mutable_relations(0)
         ->mutable_root()
@@ -266,9 +262,9 @@ TEST_CASE("MO alias-only inspection preserves shared immutable comparison bindin
     args.push_back(duckdb::make_uniq<duckdb::BoundConstantExpression>(
       mo_decimal::duckdb_value(decimal_fixture::small(number), input)));
   auto expression = mo_decimal::bound_scalar(mo_decimal::decimal_op::less, std::move(args), output);
-  auto original   = expression->return_type;
+  auto original   = expression->GetReturnType();
   auto alias      = original.GetAlias();
-  expression      = duckdb::make_uniq<duckdb::BoundCastExpression>(
+  expression      = duckdb::BoundCastExpression::Create(
     std::move(expression), duckdb::LogicalType::BOOLEAN, duckdb::BoundCastInfo(nullptr));
   mo_decimal::restore_exact_bound_types(expression);
   REQUIRE(expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION);

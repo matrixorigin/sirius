@@ -12,7 +12,8 @@ endif()
 
 function(sirius_add_duckdb_source)
   # Keep DuckDB options scoped to its dependency build.
-  set(DUCKDB_EXTENSION_CONFIGS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/sirius-tae-extension.cmake")
+  set(DUCKDB_EXTENSION_CONFIGS
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/sirius-tae-extension.cmake")
   set(BUILD_EXTENSIONS "core_functions;parquet")
   set(BUILD_SHELL OFF)
   set(BUILD_UNITTESTS OFF)
@@ -56,7 +57,11 @@ if(DEFINED STANDARD_VECTOR_SIZE AND NOT STANDARD_VECTOR_SIZE STREQUAL "")
 endif()
 target_link_libraries(
   sirius_duckdb_dependency INTERFACE duckdb_static core_functions_extension
-                                     parquet_extension)
+                                     parquet_extension tae_scanner_extension)
+
+target_include_directories(
+  sirius_duckdb_dependency
+  INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include")
 
 function(sirius_link_duckdb_extensions target)
   set(DUCKDB_MODULE_BASE_DIR "${SIRIUS_DUCKDB_SOURCE_DIR}")

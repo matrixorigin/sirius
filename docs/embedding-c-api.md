@@ -17,21 +17,22 @@ independent: the default is two, and one and four are also validated.
 
 ## Build and link
 
-Use Pixi and the existing native build. For example:
+Configure the standalone engine from the repository root with Pixi:
 
 ```sh
-pixi run cmake --build build/upstream-dev-merge \
+pixi run cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DSIRIUS_BUILD_TESTS=ON
+pixi run cmake --build build/release \
   --target sirius_embed sirius_c_smoke sirius_native_control_unittest -j 8
 ```
 
-`Sirius::embed` links the bridge archive, static Sirius/DuckDB, the explicit
-dummy extension loader, CUDA device-link objects and their native dependencies.
+`Sirius::embed` links the bridge archive, static Sirius/DuckDB, the generated
+DuckDB extension loader, CUDA device-link objects and their native dependencies.
 The generated SDK records both the verified C compiler (`c_compiler`) and C++
 link driver (`compiler`). CGo consumers must use both, so compiled libc calls
 and final linking use the same SDK headers and sysroot.
 Do not link only `libsirius_embed.a` or a loadable DuckDB extension.
 
-Building `sirius_c_smoke` also generates `extension/sirius/embedding-sdk`:
+Building `sirius_c_smoke` also generates `build/release/embedding-sdk`:
 
 - `sirius_c.h`: C99-compatible ABI version 1, with no C++/DuckDB/cuDF includes;
 - `link.json`: compiler and complete verified link arguments;
@@ -332,19 +333,19 @@ batch is unsafe because it can duplicate rows already observed by the caller.
 ## Validation
 
 ```sh
-pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
+pixi run build/release/sirius_native_control_unittest \
   '[native_control],[native_credit]'
-pixi run build/upstream-dev-merge/extension/sirius/sirius_native_control_unittest \
+pixi run build/release/sirius_native_control_unittest \
   '[native_input],[native_result],[native_stats]'
-pixi run build/upstream-dev-merge/extension/sirius/sirius_native_gpu_unittest \
+pixi run build/release/sirius_native_gpu_unittest \
   '[native_gpu],[native_result_gpu],[native_admission]'
-pixi run build/upstream-dev-merge/extension/sirius/sirius_c_smoke \
+pixi run build/release/sirius_c_smoke \
   test/cpp/scan/memory.yaml
-pixi run build/upstream-dev-merge/extension/sirius/sirius_native_result_integration \
+pixi run build/release/sirius_native_result_integration \
   test/cpp/scan/memory.yaml 1
-pixi run build/upstream-dev-merge/extension/sirius/sirius_native_result_integration \
+pixi run build/release/sirius_native_result_integration \
   test/cpp/scan/memory.yaml 2
-pixi run build/upstream-dev-merge/extension/sirius/test/cpp/sirius_unittest \
+pixi run build/release/test/cpp/sirius_unittest \
   '[gpu_pipeline_task],[completion_handler],[sirius_ffi],[tae_scan]'
 ```
 

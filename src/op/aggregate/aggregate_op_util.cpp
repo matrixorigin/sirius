@@ -21,8 +21,8 @@
 #include "expression/aggregate_id.hpp"
 #include "expression/ast/node.hpp"
 #include "helper/numeric_narrowing.hpp"
-#include "sirius/exception.hpp"
 #include "numeric/decimal_aggregate_layout.hpp"
+#include "sirius/exception.hpp"
 
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/reduction.hpp>

@@ -449,3 +449,13 @@ TEST_CASE("TAE metadata rejects aliased block expansion before parsed allocation
   demand->close();
   CHECK(budget->inspect().bytes == 0);
 }
+
+TEST_CASE("TAE splits require matching contracts without foreign physical checks",
+          "[tae_gpu][certificate]")
+{
+  tae_scan_info split;
+  split.set_contract_payload(7, {}, {});
+  REQUIRE_NOTHROW(validate_split_for_gpu(7, {}, {}, split));
+  REQUIRE_THROWS(validate_split_for_gpu(8, {}, {}, split));
+  REQUIRE_THROWS(validate_split_for_gpu(7, check_bit(later_check::profile_per_file), {}, split));
+}

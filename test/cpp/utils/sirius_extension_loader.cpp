@@ -4,6 +4,7 @@
 #include <core_functions_extension.hpp>
 #include <duckdb/main/extension_helper.hpp>
 #include <parquet_extension.hpp>
+#include <tae_scanner_extension.hpp>
 
 // Preserve automatic registration in engine tests without building the wrapper.
 namespace duckdb {
@@ -16,13 +17,15 @@ ExtensionLoadResult ExtensionHelper::LoadExtension(DuckDB& db, const std::string
     db.LoadStaticExtension<CoreFunctionsExtension>();
   } else if (extension == "parquet") {
     db.LoadStaticExtension<ParquetExtension>();
+  } else if (extension == "tae_scanner") {
+    db.LoadStaticExtension<TaeScannerExtension>();
   } else {
     return ExtensionLoadResult::NOT_LOADED;
   }
   return ExtensionLoadResult::LOADED_EXTENSION;
 }
 
-vector<string> LinkedExtensions() { return {"sirius", "core_functions", "parquet"}; }
+vector<string> LinkedExtensions() { return {"sirius", "core_functions", "parquet", "tae_scanner"}; }
 
 void ExtensionHelper::LoadAllExtensions(DuckDB& db)
 {

@@ -12,6 +12,8 @@ class ClientContext;
 namespace sirius::mo_decimal {
 std::string normalize_exact_substrait(std::string_view bytes,
                                       std::size_t schema_bytes_limit = 16u << 20);
+void fold_exact_import_constants(duckdb::ClientContext& context,
+                                 duckdb::unique_ptr<duckdb::Expression>& expression);
 void restore_exact_bound_types(duckdb::unique_ptr<duckdb::Expression>& expression);
 void rewrite_exact_comparisons(duckdb::unique_ptr<duckdb::LogicalOperator>& plan,
                                duckdb::ClientContext& context);

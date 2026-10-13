@@ -12,6 +12,7 @@ std::unique_ptr<cudf::table> convert_native_input(input_unit const& unit,
                                                   std::span<const sirius_input_column> schema,
                                                   cucascade::memory::memory_space const& gpu,
                                                   rmm::cuda_stream_view stream);
+bool is_native_input_split(op::scan::scan_info const& split) noexcept;
 std::shared_ptr<op::scan::gpu_ingestible> make_native_ingestible(
-  std::shared_ptr<native_input> input);
+  std::shared_ptr<native_input> input, uint64_t contract_id = 0);
 }  // namespace sirius::embedding

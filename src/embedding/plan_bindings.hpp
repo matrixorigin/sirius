@@ -15,10 +15,14 @@ inline constexpr const char* embedded_tae_function = "sirius_embedded_tae_read";
 
 struct embedded_mo_bind_data final : duckdb::TableFunctionData {
   std::shared_ptr<native_input> input;
+  duckdb::vector<duckdb::LogicalType> types;
+  duckdb::vector<std::string> names;
   duckdb::unique_ptr<duckdb::FunctionData> Copy() const override
   {
     auto copy   = duckdb::make_uniq<embedded_mo_bind_data>();
     copy->input = input;
+    copy->types = types;
+    copy->names = names;
     return copy;
   }
 };
@@ -60,6 +64,7 @@ class embedded_bind_catalog final : public duckdb::ClientContextState {
   std::map<uint64_t, embedded_binding> entries_;
 };
 
+duckdb::TableFunction get_embedded_read_function(bool tae);
 void register_embedded_read_functions(duckdb::DatabaseInstance&);
 duckdb::shared_ptr<embedded_bind_catalog> embedded_catalog_for(duckdb::ClientContext&);
 }  // namespace sirius::embedding

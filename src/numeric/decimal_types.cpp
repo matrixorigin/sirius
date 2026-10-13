@@ -38,7 +38,7 @@ duckdb::LogicalType duckdb_type(logical_type const& type)
       (!type.is_mo_decimal() && type.id() != type_id::BOOLEAN && type.id() != type_id::BIGINT))
     throw std::invalid_argument("invalid MO exact-decimal carrier");
   auto result = carrier(type);
-  result.SetAlias(alias(type));
+  result      = result.WithAlias(alias(type));
   return result;
 }
 std::optional<logical_type> from_duckdb_type(duckdb::LogicalType const& type)
@@ -107,7 +107,7 @@ duckdb::Value duckdb_value(coefficient const& value, logical_type const& type)
                                     duckdb::Value::UBIGINT(limbs[1]),
                                     duckdb::Value::UBIGINT(limbs[0])});
   }
-  result.Reinterpret(duckdb_type(type));
+  result = result.WithType(duckdb_type(type));
   return result;
 }
 coefficient from_duckdb_value(duckdb::Value const& value, logical_type const& type)

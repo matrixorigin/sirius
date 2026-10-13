@@ -6,8 +6,8 @@
 	ignore = dirty
 [submodule "substrait"]
 	path = substrait
-	url = https://github.com/sirius-db/duckdb-substrait-extension.git
-	branch = v2
+	url = https://github.com/matrixorigin/duckdb-substrait.git
+	branch = rebase/duckdb-v2-import-hooks
 [submodule "cucascade"]
 	path = cucascade
 	url = https://github.com/NVIDIA/cuCascade.git
@@ -39,3 +39,4 @@
 [submodule "tae-scanner"]
 	path = tae-scanner
 	url = https://github.com/matrixorigin/duckdb-tae-scanner.git
+	branch = rebase/duckdb-v2-tae

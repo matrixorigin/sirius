@@ -16,7 +16,6 @@
 
 #pragma once
 #include "embedding/execution_stats.hpp"
-
 #include "scan_manager/preparation.hpp"
 #include "transparent/replay_admission.hpp"
 
@@ -43,7 +42,10 @@ namespace sirius::pipeline {
 class completion_handler {
  public:
   completion_handler() = default;
-  explicit completion_handler(std::shared_ptr<embedding::execution_stats> stats) : execution_stats_(std::move(stats)) {}
+  explicit completion_handler(std::shared_ptr<embedding::execution_stats> stats)
+    : execution_stats_(std::move(stats))
+  {
+  }
   explicit completion_handler(std::shared_ptr<std::atomic<uint64_t>> tasks)
     : tasks_started_(std::move(tasks))
   {
@@ -252,7 +254,10 @@ class completion_handler {
     return _fatal_error;
   }
 
-  void set_execution_stats(std::shared_ptr<embedding::execution_stats> stats) { execution_stats_ = std::move(stats); }
+  void set_execution_stats(std::shared_ptr<embedding::execution_stats> stats)
+  {
+    execution_stats_ = std::move(stats);
+  }
   void gpu_task_started() const noexcept
   {
     if (execution_stats_) execution_stats_->gpu_task_started();
