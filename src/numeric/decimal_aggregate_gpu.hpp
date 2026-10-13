@@ -9,6 +9,14 @@ struct aggregate_columns {
   std::unique_ptr<cudf::column> counts;
 };
 
+// Raw nonnullable Decimal128 local sums can be sign-extended into the existing
+// Decimal256 state carrier without rounding or precision validation. The caller
+// retains the input until its task stream is quiescent.
+std::unique_ptr<cudf::column> promote_aggregate_sum(cudf::column_view sums,
+                                                    uint8_t scale,
+                                                    rmm::cuda_stream_view stream,
+                                                    rmm::device_async_resource_ref mr);
+
 // Offsets cover dense groups in the permutation (or original rows when order
 // is empty). Empty counts means initial rows; otherwise these are raw states.
 aggregate_columns reduce_aggregate_columns(aggregate_op op,

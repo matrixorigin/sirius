@@ -6,6 +6,31 @@ The semantic authority remains MO #29449 document blob
 `42a89f09a1d168d02b9583cb3ea7b4de6dbb5634`; MO #29690 records the B-F
 delivery sequence. The detailed implementation plan was approved before code.
 
+## Approved Decimal64 grouped aggregation optimization (2026-10-13)
+
+The MO owner approved this focused optimization before implementation. A whole
+grouped node with ordinary integer/boolean/date/string keys, exact Decimal64
+SUM/AVG and supported COUNT slots, without DISTINCT, may use one batched cuDF
+groupby request set. All other nodes retain the existing GPU implementation.
+Every local batch has at most INT32_MAX rows: summing the full signed 64-bit
+coefficient domain fits in signed 128 bits, independently of sampled values or
+declared precision. Operands keep their scale when widened for local sums.
+
+Local output retains the existing immutable layout: NULL-key groups, shared
+slot ordinals, nonnullable coefficient/count states, zero sum/count for all-NULL
+groups and sign extension into selected 256-bit states. Sort only the resulting
+group rows to preserve key ordering. Checked global merge, final SUM precision,
+AVG rounding and operation-owned errors do not change. The task's existing
+reservation owns input casts, cuDF results, normalization and sort scratch;
+quiescence precedes temporary destruction, including every exception path.
+
+Independent exact vectors and equivalent wider-input controls cover extremes,
+NULL/empty groups, multiple slots/partials and public overflow. Owning GPU tests,
+memory checking, cancellation/reuse and a matched high-cardinality benchmark
+precede delivery; public SF1/SF10 qualification targets at least 15% Q20
+improvement without a full-suite regression above 5%. Native capability and
+C ABI layouts are unchanged. Generated measurements remain outside Git.
+
 ## Approved input initialization optimization (2026-10-13)
 
 The MO owner approved a focused performance increment before implementation.
