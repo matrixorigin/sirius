@@ -6,8 +6,13 @@
 #include "numeric/decimal_functions.hpp"
 #include "numeric/exact_decimal.hpp"
 
+#include <duckdb/catalog/catalog.hpp>
+#include <duckdb/catalog/catalog_entry/type_catalog_entry.hpp>
+#include <duckdb/main/client_context.hpp>
+#include <duckdb/parser/expression/cast_expression.hpp>
 #include <duckdb/parser/expression/constant_expression.hpp>
 #include <duckdb/parser/expression/function_expression.hpp>
+#include <duckdb/parser/parsed_data/create_type_info.hpp>
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/wire_format_lite.h>
 
@@ -58,6 +63,24 @@ logical_type result_type(substrait::Type const& type, std::vector<uint32_t> cons
     return logical_type::make(type_id::BIGINT).with_nullability(nullable(type.i64().nullability()));
   throw std::invalid_argument("unsupported MO decimal result type");
 }
+// V2 reconstructs typed constants as SQL casts, so their private aliases must
+// resolve in this connection's temporary catalog before relation binding.
+duckdb::LogicalType import_type(duckdb::ClientContext& context, logical_type const& logical)
+{
+  auto type = duckdb_type(logical);
+  context.RunFunctionInTransaction([&] {
+    auto& catalog = duckdb::Catalog::GetCatalog(context, duckdb::Identifier("temp"));
+    duckdb::CreateTypeInfo info(type.GetAlias(), type);
+    info.temporary   = true;
+    info.on_conflict = duckdb::OnCreateConflict::IGNORE_ON_CONFLICT;
+    catalog.CreateType(context, info);
+    auto& entry = duckdb::Catalog::GetEntry<duckdb::TypeCatalogEntry>(
+      context, duckdb::QualifiedName("temp", "main", duckdb::Identifier(type.GetAlias())));
+    if (entry.user_type != type)
+      throw std::invalid_argument("conflicting MO exact-decimal import type");
+  });
+  return type;
+}
 class importer final : public duckdb::SubstraitExtensionHandler {
   std::vector<uint32_t> anchors_;
 
@@ -72,16 +95,16 @@ class importer final : public duckdb::SubstraitExtensionHandler {
   {
     return identity.urn == extension_uri;
   }
-  duckdb::LogicalType Type(duckdb::ClientContext&,
+  duckdb::LogicalType Type(duckdb::ClientContext& context,
                            duckdb::SubstraitExtensionIdentity const& identity,
                            substrait::Type const& type) const override
   {
     if (!Handles(identity) || identity.name != "mo_exact_decimal" || !type.has_user_defined())
       throw std::invalid_argument("unhandled MO numeric type identity");
-    return duckdb_type(result_type(type, anchors_));
+    return import_type(context, result_type(type, anchors_));
   }
   duckdb::unique_ptr<duckdb::ParsedExpression> Literal(
-    duckdb::ClientContext&,
+    duckdb::ClientContext& context,
     duckdb::SubstraitExtensionIdentity const& identity,
     substrait::Expression_Literal const& literal) const override
   {
@@ -116,12 +139,16 @@ class importer final : public duckdb::SubstraitExtensionHandler {
     }
     if (!found || !width_matches || !input.ConsumedEntireMessage())
       throw std::invalid_argument("MO decimal literal coefficient width mismatch");
-    auto value = load_coefficient(coefficient.data(), type.bytes());
-    return duckdb::make_uniq<duckdb::ConstantExpression>(
-      duckdb_value(value, logical_type::make_mo_decimal(type, literal.nullable())));
+    auto value   = load_coefficient(coefficient.data(), type.bytes());
+    auto logical = logical_type::make_mo_decimal(type, literal.nullable());
+    import_type(context, logical);
+    // FromValue spells STRUCT values with struct_pack, which loses the outer alias.
+    // Restore the checked carrier explicitly, including Decimal256 literals.
+    return duckdb::make_uniq<duckdb::CastExpression>(
+      duckdb_type(logical), duckdb::ConstantExpression::FromValue(duckdb_value(value, logical)));
   }
   duckdb::unique_ptr<duckdb::ParsedExpression> Scalar(
-    duckdb::ClientContext&,
+    duckdb::ClientContext& context,
     duckdb::SubstraitExtensionIdentity const& identity,
     substrait::Expression_ScalarFunction const& scalar,
     duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>> children) const override
@@ -137,12 +164,12 @@ class importer final : public duckdb::SubstraitExtensionHandler {
       throw std::invalid_argument("invalid MO exact-decimal scalar arity");
     auto output = result_type(scalar.output_type(), anchors_);
     children.push_back(
-      duckdb::make_uniq<duckdb::ConstantExpression>(duckdb::Value(duckdb_type(output))));
-    return duckdb::make_uniq<duckdb::FunctionExpression>(std::string(to_duckdb_function_name(*id)),
-                                                         std::move(children));
+      duckdb::ConstantExpression::FromValue(duckdb::Value(import_type(context, output))));
+    return duckdb::make_uniq<duckdb::FunctionExpression>(
+      duckdb::Identifier(std::string(to_duckdb_function_name(*id))), std::move(children));
   }
   duckdb::unique_ptr<duckdb::ParsedExpression> Aggregate(
-    duckdb::ClientContext&,
+    duckdb::ClientContext& context,
     duckdb::SubstraitExtensionIdentity const& identity,
     substrait::AggregateFunction const& aggregate,
     duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>> children) const override
@@ -157,9 +184,9 @@ class importer final : public duckdb::SubstraitExtensionHandler {
       throw std::invalid_argument("unknown MO aggregate identity");
     auto output = result_type(aggregate.output_type(), anchors_);
     children.push_back(
-      duckdb::make_uniq<duckdb::ConstantExpression>(duckdb::Value(duckdb_type(output))));
-    return duckdb::make_uniq<duckdb::FunctionExpression>(std::string(to_duckdb_aggregate_name(*id)),
-                                                         std::move(children));
+      duckdb::ConstantExpression::FromValue(duckdb::Value(import_type(context, output))));
+    return duckdb::make_uniq<duckdb::FunctionExpression>(
+      duckdb::Identifier(std::string(to_duckdb_aggregate_name(*id))), std::move(children));
   }
 };
 }  // namespace

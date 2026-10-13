@@ -17,9 +17,9 @@
 #include "op/partition/gpu_partition_impl.hpp"
 
 #include "data/data_batch_utils.hpp"
-#include "op/join_key_preparation.hpp"
 #include "helper/numeric_narrowing.hpp"
 #include "numeric/decimal_aggregate_gpu.hpp"
+#include "op/join_key_preparation.hpp"
 
 #include <cudf/partitioning.hpp>
 
@@ -71,7 +71,8 @@ std::vector<std::shared_ptr<cucascade::data_batch>> gpu_partition_impl::hash_par
       owned_cast_cols.push_back(std::move(key));
     }
   for (size_t i = 0; i < partition_key_cast_types.size(); i++) {
-    if ((exact_types.empty() || !exact_types[i].bits) && partition_key_cast_types[i].id() != cudf::type_id::EMPTY) {
+    if ((exact_types.empty() || !exact_types[i].bits) &&
+        partition_key_cast_types[i].id() != cudf::type_id::EMPTY) {
       auto cast_col = restore_prepared_join_key(input_table.column(partition_key_idx[i]),
                                                 partition_key_cast_types[i],
                                                 stream,

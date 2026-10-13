@@ -136,7 +136,7 @@ CUDAARCHS = "75-real;80-real;86-real;89-real;90a-real;100f-real;120a-real;120"
 VCPKG_CUDA_VERSION = "13"
 
 [feature.mo.tasks]
-mo-configure-embedding-sdk = "cmake --preset release -S duckdb -B build/mo -DCMAKE_CUDA_COMPILER_LAUNCHER= -DEXPORT_DYNAMIC_SYMBOLS=OFF -DSIRIUS_BUILD_S3_TESTS=OFF"
+mo-configure-embedding-sdk = "cmake -S . -B build/mo -G Ninja -DCMAKE_BUILD_TYPE=Release -DSIRIUS_BUILD_TESTS=ON -DCMAKE_CUDA_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER= -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_SCAN_FOR_MODULES=OFF"
 mo-build-embedding-sdk = { cmd = "cmake --build build/mo --target sirius_c_smoke", depends-on = ["mo-configure-embedding-sdk"] }
 
 [feature.vcpkg.dependencies]

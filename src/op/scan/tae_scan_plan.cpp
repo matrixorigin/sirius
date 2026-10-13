@@ -1,3 +1,4 @@
+#include "duckdb/planner/table_filter_set.hpp"
 /*
  * Copyright 2025, Sirius Contributors.
  *
@@ -191,7 +192,9 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
   // seqnums once. compute_task previously rebuilt the seqnum dedup on every
   // task call.
   if (table_filters) {
-    for (auto& [col_idx, filter] : table_filters->filters) {
+    for (auto const& entry : *table_filters) {
+      auto const col_idx = entry.GetIndex().GetIndex();
+      auto const& filter = entry.Filter();
       if (col_idx >= column_ids.size()) continue;
       auto const seqnum_p = column_ids[col_idx].GetPrimaryIndex();
       if (duckdb::IsVirtualColumn(seqnum_p)) continue;
@@ -201,7 +204,7 @@ tae_scan_plan build_tae_scan_plan(const tae::TAEScanBindData& bind_data,
       auto const c      = checked_uint16(col_idx, "filter column_ids index");
       std::uint8_t const mo_oid =
         (seqnum_p < plan.all_col_mo_oids.size()) ? plan.all_col_mo_oids[seqnum_p] : 0;
-      tae::ExtractFilter(*filter, c, seqnum, mo_oid, plan.pushed_filters);
+      tae::ExtractFilter(filter, c, seqnum, mo_oid, plan.pushed_filters);
     }
     if (!plan.pushed_filters.empty()) {
       SIRIUS_LOG_INFO("[tae_scan_plan] extracted {} zone-map filters", plan.pushed_filters.size());

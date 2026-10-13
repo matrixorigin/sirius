@@ -294,9 +294,8 @@ void sirius_engine::execute(std::stop_token stop, std::chrono::steady_clock::tim
   plan_users_quiescent_ = false;
   // Create the query with the pipelines. It is owned here, alongside the plan it indexes.
   auto cancelled = std::make_exception_ptr(embedding::execution_interrupted(false));
-  std::stop_callback cancel(stop, [handler = completion_handler_, cancelled] {
-    handler->report_error(cancelled);
-  });
+  std::stop_callback cancel(
+    stop, [handler = completion_handler_, cancelled] { handler->report_error(cancelled); });
   try {
     query_ = sirius_ctx->create_query(std::move(new_scheduled),
                                       query_id_,

@@ -54,8 +54,9 @@ TEST_CASE("full converter admission parks before claiming GPU work and respects 
   exec::thread_pool_config config;
   config.num_threads = 2;
   auto telemetry     = test::make_test_telemetry_context();
+  exec::query_lifecycle_registry lifecycle;
   pipeline::gpu_pipeline_executor executor(
-    config, space, channel.make_publisher(), nullptr, telemetry);
+    lifecycle, config, space, channel.make_publisher(), nullptr, telemetry);
   auto state = std::make_shared<pipeline::gpu_pipeline_task_global_state>(nullptr, telemetry);
   auto stats = std::make_shared<embedding::execution_stats>();
   stats->add_source(SIRIUS_READ_TAE);

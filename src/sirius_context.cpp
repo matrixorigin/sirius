@@ -867,7 +867,8 @@ void SiriusContext::restore_cudf_pinned_memory_resource() noexcept
   prev_pinned_mr_.reset();
 }
 
-void SiriusContext::initialize(const sirius::parsed_sirius_config& config)
+void SiriusContext::initialize(const sirius::parsed_sirius_config& config,
+                               std::function<void(const sirius::sirius_config&)> validate)
 {
   if (is_initialized_) { throw std::runtime_error("Sirius context is already initialized."); }
 
@@ -895,6 +896,7 @@ void SiriusContext::initialize(const sirius::parsed_sirius_config& config)
     throw std::runtime_error("SiriusContext::initialize: no GPUs discovered");
   }
   config_ = config.resolve(discovery.get_topology());
+  if (validate) { validate(config_); }
   sirius::converter_registry::initialize(config_.get_downgrade_executor_config().copy_chunk_bytes);
 
   // Discovery is shared by all subsystems; execution GPU ids come from the

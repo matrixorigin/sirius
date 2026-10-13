@@ -16,10 +16,12 @@
 
 #include "transparent/read_view_registry.hpp"
 
+#include "embedding/native_gpu.hpp"
 #include "io/sirius_datasource.hpp"
 #include "op/scan/duckdb_native_gpu_ingestible.hpp"
 #include "op/scan/gpu_ingestible_types.hpp"
 #include "op/scan/parquet_gpu_ingestible.hpp"
+#include "op/scan/tae_gpu_ingestible.hpp"
 #include "op/sirius_physical_table_scan.hpp"
 #include "planner/connector_registry.hpp"
 #include "transparent/replay_admission.hpp"
@@ -495,7 +497,8 @@ op::scan::scan_contract_id read_view_registry::allocate_declined_scan(
     kind = op::scan::materializer_kind::duckdb_native;
   } else if (connector.kind == op::scan::source_kind::tae) {
     kind = op::scan::materializer_kind::tae;
-  } else if (connector.kind == op::scan::source_kind::stream_source) {
+  } else if (connector.kind == op::scan::source_kind::stream_source ||
+             connector.kind == op::scan::source_kind::embedded_mo) {
     kind = op::scan::materializer_kind::stream;
   } else if (connector.function_name == "iceberg_scan") {
     kind = op::scan::materializer_kind::iceberg;
@@ -810,6 +813,13 @@ void validate_split_for_gpu(scan_contract_id expected,
       }
       coverage(i, checks);
     }
+    return;
+  }
+  // These connectors validate their immutable input schema when claiming/decoding
+  // a batch; they do not use Parquet footers or DuckDB checkpoint profiles.
+  if (dynamic_cast<tae_scan_info const*>(&split) || embedding::is_native_input_split(split)) {
+    if (required.any() || expected_key || !certificates.empty() || !dependencies.empty())
+      fail("external input carries unsupported physical checks", required);
     return;
   }
   fail("unknown input class");

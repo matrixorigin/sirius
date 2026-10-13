@@ -180,6 +180,33 @@ void upload_embedded_payload(tae_scan_info const& info,
 
 class passthrough_coalescer final : public batch_coalescer {
  public:
+  cursor_step advance(scan_info& input, size_t& cursor, size_t quantum) override
+  {
+    if (cursor) return {{}, true};
+    if (!quantum) return {{}, false};
+    auto& source               = dynamic_cast<tae_scan_info&>(input);
+    auto result                = std::make_unique<tae_scan_info>();
+    result->host_credit        = std::move(source.host_credit);
+    result->host_data          = std::move(source.host_data);
+    result->work_permit        = std::move(source.work_permit);
+    result->staging            = std::move(source.staging);
+    result->io_context         = std::move(source.io_context);
+    result->object_path        = std::move(source.object_path);
+    result->object_size        = std::move(source.object_size);
+    result->crc_wrapped        = std::move(source.crc_wrapped);
+    result->stop               = std::move(source.stop);
+    result->gpu_peak_bytes     = std::move(source.gpu_peak_bytes);
+    result->chunks             = std::move(source.chunks);
+    result->rows               = std::move(source.rows);
+    result->compressed_bytes   = std::move(source.compressed_bytes);
+    result->uncompressed_bytes = std::move(source.uncompressed_bytes);
+    result->admitted_bytes.store(source.admitted_bytes.load());
+    result->set_contract_payload(source.contract_id(),
+                                 {source.certificates().begin(), source.certificates().end()},
+                                 {source.dependencies().begin(), source.dependencies().end()});
+    ++cursor;
+    return {std::move(result), true};
+  }
   std::vector<std::unique_ptr<scan_info>> push(std::unique_ptr<scan_info> info) override
   {
     std::vector<std::unique_ptr<scan_info>> out;
@@ -396,7 +423,7 @@ tae_gpu_ingestible::tae_gpu_ingestible(std::unique_ptr<tae_ingestible_table_info
                               _info->output_types.size(),
                               _info->table_filters.get());
 
-  if (_info->table_filters && !_info->table_filters->filters.empty()) {
+  if (_info->table_filters && _info->table_filters->HasFilters()) {
     _filter_expression =
       op::convert_table_filters_to_expression(*_info->table_filters,
                                               _info->column_ids,
@@ -499,6 +526,7 @@ std::unique_ptr<op::operator_data> tae_gpu_ingestible::live_claim()
     ready = std::move(_ready);
   }
   if (!ready) return {};
+  ready->set_contract_payload(_info->contract_id, {}, {});
   live_request();
   return std::make_unique<scan_operator_input>(std::move(ready));
 }
@@ -713,7 +741,9 @@ gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
     _info->bind_data->data_dir + "/" + _info->bind_data->objects[object_index].file_path;
   auto io_ctx = resolve(file_path);
   return [this, object_index, block_index, io_ctx = std::move(io_ctx)] {
-    return load_object(object_index, block_index, io_ctx);
+    auto result = load_object(object_index, block_index, io_ctx);
+    result->set_contract_payload(_info->contract_id, {}, {});
+    return result;
   };
 }
 

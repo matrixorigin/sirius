@@ -127,7 +127,8 @@ class importer {
         if (found) return;
         if (value.GetExpressionClass() == duckdb::ExpressionClass::BOUND_AGGREGATE) {
           auto const& aggregate = value.Cast<duckdb::BoundAggregateExpression>();
-          auto id               = sirius::from_duckdb_aggregate_name(aggregate.function.name);
+          auto id =
+            sirius::from_duckdb_aggregate_name(aggregate.Function().GetName().GetIdentifierName());
           if (id && sirius::mo_decimal::is_decimal_aggregate(*id)) {
             found = sirius::ast::from_duckdb(value);
             return;
@@ -135,7 +136,8 @@ class importer {
         }
         if (value.GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION) {
           auto const& function = value.Cast<duckdb::BoundFunctionExpression>();
-          auto id              = sirius::from_duckdb_function_name(function.function.name);
+          auto id =
+            sirius::from_duckdb_function_name(function.Function().GetName().GetIdentifierName());
           if (id && sirius::mo_decimal::is_decimal_function(*id)) {
             found = sirius::ast::from_duckdb(value);
             return;

@@ -127,16 +127,17 @@ void never_execute(duckdb::DataChunk&, duckdb::ExpressionState&, duckdb::Vector&
 {
   throw duckdb::NotImplementedException("MO exact-decimal marker cannot execute in DuckDB");
 }
-duckdb::unique_ptr<duckdb::FunctionData> bind_scalar(
-  duckdb::ClientContext&,
-  duckdb::ScalarFunction& fn,
-  duckdb::vector<duckdb::unique_ptr<duckdb::Expression>>& arguments)
+duckdb::unique_ptr<duckdb::FunctionData> bind_scalar(duckdb::BindScalarFunctionInput& input)
 {
-  auto id = from_duckdb_function_name(fn.name);
+  auto& fn        = input.GetBoundFunction();
+  auto& arguments = input.GetArguments();
+  for (auto& argument : arguments)
+    fold_exact_import_constants(input.GetClientContext(), argument);
+  auto id = from_duckdb_function_name(fn.GetName().GetIdentifierName());
   if (!id || !is_decimal_function(*id) || arguments.empty() ||
       arguments.back()->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT)
     throw duckdb::InvalidInputException("invalid MO decimal binding marker");
-  auto const& marker = arguments.back()->Cast<duckdb::BoundConstantExpression>().value;
+  auto const& marker = arguments.back()->Cast<duckdb::BoundConstantExpression>().GetValue();
   auto output        = from_duckdb_type(marker.type());
   if (!marker.IsNull() || !output)
     throw duckdb::InvalidInputException("MO decimal binding needs its declared output type");
@@ -144,30 +145,30 @@ duckdb::unique_ptr<duckdb::FunctionData> bind_scalar(
   duckdb::vector<duckdb::LogicalType> carriers;
   for (std::size_t i = 0; i + 1 < arguments.size(); ++i) {
     restore_exact_bound_types(arguments[i]);
-    inputs.push_back(sirius::from_duckdb(arguments[i]->return_type));
-    carriers.push_back(arguments[i]->return_type);
+    inputs.push_back(sirius::from_duckdb(arguments[i]->GetReturnType()));
+    carriers.push_back(arguments[i]->GetReturnType());
   }
   validate_signature(operation(*id), inputs, *output);
-  fn.return_type = marker.type();
+  fn.SetReturnType(marker.type());
   arguments.pop_back();
-  fn.arguments = carriers;
-  return duckdb::make_uniq<scalar_data>(operation(*id), std::move(carriers), fn.return_type);
+  fn.GetArguments() = carriers;
+  return duckdb::make_uniq<scalar_data>(operation(*id), std::move(carriers), fn.GetReturnType());
 }
 duckdb::ScalarFunction scalar_function(decimal_op op)
 {
   auto arity = op == decimal_op::cast || op == decimal_op::negate ? 1u : 2u;
   duckdb::vector<duckdb::LogicalType> arguments(arity + 1, duckdb::LogicalType::ANY);
-  return duckdb::ScalarFunction(std::string(to_duckdb_function_name(function(op))),
-                                std::move(arguments),
-                                duckdb::LogicalType::ANY,
-                                never_execute,
-                                bind_scalar,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                duckdb::LogicalType::INVALID,
-                                duckdb::FunctionStability::VOLATILE,
-                                duckdb::FunctionNullHandling::SPECIAL_HANDLING);
+  return duckdb::ScalarFunction(
+    duckdb::Identifier(std::string(to_duckdb_function_name(function(op)))),
+    std::move(arguments),
+    duckdb::LogicalType::ANY,
+    never_execute,
+    bind_scalar,
+    nullptr,
+    nullptr,
+    duckdb::LogicalType::INVALID,
+    duckdb::FunctionStability::VOLATILE,
+    duckdb::FunctionNullHandling::SPECIAL_HANDLING);
 }
 }  // namespace
 
@@ -209,15 +210,16 @@ void register_scalar_functions(duckdb::DatabaseInstance& instance)
 }
 void validate_bound_scalar(duckdb::BoundFunctionExpression const& expression)
 {
-  auto data = dynamic_cast<scalar_data const*>(expression.bind_info.get());
-  auto id   = from_duckdb_function_name(expression.function.name);
+  auto data = dynamic_cast<scalar_data const*>(expression.BindInfo().get());
+  auto id   = from_duckdb_function_name(expression.Function().GetName().GetIdentifierName());
   if (!data || !id || !is_decimal_function(*id) || data->op != operation(*id) ||
-      data->output != expression.return_type || data->inputs.size() != expression.children.size() ||
-      expression.function.GetBindCallback() != bind_scalar)
+      data->output != expression.GetReturnType() ||
+      data->inputs.size() != expression.GetChildren().size() ||
+      expression.Function().GetBindCallback() != bind_scalar)
     throw std::invalid_argument("MO decimal bound function lost its checked signature");
   std::vector<logical_type> inputs;
   for (std::size_t i = 0; i < data->inputs.size(); ++i) {
-    if (data->inputs[i] != expression.children[i]->return_type)
+    if (data->inputs[i] != expression.GetChildren()[i]->GetReturnType())
       throw std::invalid_argument("MO decimal bound operand type mismatch");
     inputs.push_back(sirius::from_duckdb(data->inputs[i]));
   }
@@ -231,16 +233,15 @@ duckdb::unique_ptr<duckdb::Expression> bound_scalar(
   duckdb::vector<duckdb::LogicalType> carriers;
   std::vector<logical_type> inputs;
   for (auto const& child : children) {
-    carriers.push_back(child->return_type);
-    inputs.push_back(sirius::from_duckdb(child->return_type));
+    carriers.push_back(child->GetReturnType());
+    inputs.push_back(sirius::from_duckdb(child->GetReturnType()));
   }
   validate_signature(op, inputs, output);
-  auto fn          = scalar_function(op);
-  fn.arguments     = carriers;
-  fn.return_type   = sirius::to_duckdb(output);
-  auto data        = duckdb::make_uniq<scalar_data>(op, std::move(carriers), fn.return_type);
-  auto result_type = fn.return_type;
+  duckdb::BoundScalarFunction fn(scalar_function(op));
+  fn.GetArguments() = carriers;
+  fn.SetReturnType(sirius::to_duckdb(output));
+  auto data = duckdb::make_uniq<scalar_data>(op, std::move(carriers), fn.GetReturnType());
   return duckdb::make_uniq<duckdb::BoundFunctionExpression>(
-    std::move(result_type), std::move(fn), std::move(children), std::move(data));
+    std::move(fn), std::move(children), std::move(data));
 }
 }  // namespace sirius::mo_decimal

@@ -17,8 +17,8 @@
 #pragma once
 #include "config.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "event/query_event_publisher.hpp"
 #include "embedding/source_wakeup.hpp"
+#include "event/query_event_publisher.hpp"
 #include "exec/bounded_thread_pool.hpp"
 #include "exec/config.hpp"
 #include "exec/interruptible_mpmc.hpp"

@@ -923,6 +923,14 @@ try {
                                                       : source_path.string() + ": " + e.what());
 }
 
+parsed_sirius_config parsed_sirius_config::with_gpu_pipeline_executor_threads(
+  uint32_t threads) const
+{
+  auto impl = std::make_shared<Impl>(*impl_);
+  impl->settings.set_gpu_pipeline_executor_threads(threads);
+  return parsed_sirius_config(std::move(impl));
+}
+
 sirius_config parsed_sirius_config::resolve(
   const cucascade::memory::system_topology_info& hw_topology) const
 try {
@@ -1088,5 +1096,7 @@ void sirius_config::set_object_store_config(io::object_store_config config) noex
 
 namespace sirius {
 const embedding_config& parsed_sirius_config::get_embedding_config() const noexcept
-{ return impl_->settings.get_embedding_config(); }
+{
+  return impl_->settings.get_embedding_config();
 }
+}  // namespace sirius

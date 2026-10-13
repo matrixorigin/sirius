@@ -447,6 +447,7 @@ class parsed_sirius_config {
   [[nodiscard]] const embedding_config& get_embedding_config() const noexcept;
   [[nodiscard]] const operator_params& get_operator_params() const noexcept;
   [[nodiscard]] const compression_config& get_compression_config() const noexcept;
+  [[nodiscard]] parsed_sirius_config with_gpu_pipeline_executor_threads(uint32_t threads) const;
   [[nodiscard]] sirius_config resolve(
     const cucascade::memory::system_topology_info& topology) const;
 

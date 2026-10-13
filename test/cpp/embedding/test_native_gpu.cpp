@@ -1,3 +1,4 @@
+#include "transparent/read_view_registry.hpp"
 /* Copyright 2026 Sirius Contributors. SPDX-License-Identifier: Apache-2.0 */
 // Private test backend: public C entry points + real native source, scheduler,
 // pooled staging and CUDA conversion. No production fake-plan syntax/capability.
@@ -118,25 +119,48 @@ class gpu_driver final : public query_driver {
     : inputs_(inputs),
       scope_(context, *connection.context, "native_input_test"),
       iface_(*connection.context, std::optional<std::string>("native_input_test")),
-      engine_(*connection.context, iface_, scope_.query_id())
+      engine_(*connection.context, scope_.query_id())
   {
-    auto sink = duckdb::make_uniq<checking_sink>();
-    auto left = duckdb::make_uniq<sirius::op::scan::sirius_gpu_scan_operator>(
-      test_types(), 10000, make_native_ingestible(inputs.reads.at(0)));
-    auto right = duckdb::make_uniq<sirius::op::scan::sirius_gpu_scan_operator>(
-      test_types(), 10000, make_native_ingestible(inputs.reads.at(1)));
+    auto sink      = duckdb::make_uniq<checking_sink>();
+    auto registry  = std::make_shared<sirius::transparent::read_view_registry>();
+    auto make_scan = [&](std::size_t index) {
+      using namespace sirius::op::scan;
+      bound_read_identity identity;
+      identity.source = {
+        "sirius_embedded_mo_read", source_kind::embedded_mo, "sirius.embedded_mo.v1"};
+      identity.data_view   = stream_identity{index + 1};
+      identity.bound_types = sirius::to_duckdb_vec(test_types());
+      identity.bound_names = {"id", "payload"};
+      bound_read_view view;
+      view.identity = make_bound_read_identity(std::move(identity), {});
+      auto id       = allocate_scan_contract(*registry,
+                                       std::nullopt,
+                                       1,
+                                       index + 1,
+                                       std::make_shared<bound_read_view const>(std::move(view)),
+                                             {},
+                                             {},
+                                             {materializer_kind::stream, "sirius.embedded_mo.v1"});
+      return duckdb::make_uniq<sirius_gpu_scan_operator>(
+        test_types(),
+        10000,
+        make_native_ingestible(inputs.reads.at(index), id),
+        id,
+        nullptr,
+        registry);
+    };
+    auto left  = make_scan(0);
+    auto right = make_scan(1);
     duckdb::LogicalComparisonJoin logical(duckdb::JoinType::INNER);
     logical.types = {duckdb::LogicalType::BIGINT,
                      duckdb::LogicalType::VARCHAR,
                      duckdb::LogicalType::BIGINT,
                      duckdb::LogicalType::VARCHAR};
     duckdb::vector<duckdb::JoinCondition> conditions;
-    duckdb::JoinCondition condition;
-    condition.left =
-      duckdb::make_uniq<duckdb::BoundReferenceExpression>(duckdb::LogicalType::BIGINT, 0);
-    condition.right =
-      duckdb::make_uniq<duckdb::BoundReferenceExpression>(duckdb::LogicalType::BIGINT, 0);
-    condition.comparison = duckdb::ExpressionType::COMPARE_EQUAL;
+    duckdb::JoinCondition condition(
+      duckdb::make_uniq<duckdb::BoundReferenceExpression>(duckdb::LogicalType::BIGINT, 0),
+      duckdb::make_uniq<duckdb::BoundReferenceExpression>(duckdb::LogicalType::BIGINT, 0),
+      duckdb::ExpressionType::COMPARE_EQUAL);
     conditions.push_back(std::move(condition));
     sink->types = sirius::from_duckdb_vec(logical.types);
     sink->children.push_back(duckdb::make_uniq<sirius::op::sirius_physical_hash_join>(
@@ -179,9 +203,8 @@ class gpu_backend final : public engine_backend {
  public:
   gpu_backend(std::string const& path, uint32_t streams)
   {
-    sirius::sirius_config config;
-    config.load_from_file(path);
-    config.set_gpu_pipeline_executor_threads(streams);
+    auto config =
+      sirius::parsed_sirius_config::from_file(path).with_gpu_pipeline_executor_threads(streams);
     context_ = duckdb::make_shared_ptr<duckdb::SiriusContext>();
     context_->initialize(config);
     sirius::converter_registry::initialize();
@@ -413,8 +436,8 @@ struct fail_after_upload final : input_storage {
 
 TEST_CASE("native GPU scalar decoding preserves bits nulls constants and epochs", "[native_gpu]")
 {
-  sirius::sirius_config config;
-  config.load_from_file(std::string(SIRIUS_PROJECT_ROOT) + "/test/cpp/scan/memory.yaml");
+  auto config  = sirius::parsed_sirius_config::from_file(std::string(SIRIUS_PROJECT_ROOT) +
+                                                        "/test/cpp/scan/memory.yaml");
   auto context = duckdb::make_shared_ptr<duckdb::SiriusContext>();
   context->initialize(config);
   auto& manager = context->get_memory_manager();

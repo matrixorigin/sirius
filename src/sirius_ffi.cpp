@@ -30,44 +30,42 @@
 #include "duckdb/main/query_result.hpp"                  // duckdb::QueryResult
 #include "duckdb/main/relation.hpp"                      // duckdb::Relation
 #include "duckdb/main/settings.hpp"
-#include "duckdb/optimizer/optimizer.hpp"                  // duckdb::Optimizer
+#include "duckdb/optimizer/optimizer.hpp"  // duckdb::Optimizer
+#include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/statement/relation_statement.hpp"  // duckdb::RelationStatement
 #include "duckdb/planner/planner.hpp"                      // duckdb::Planner
-#include "exec/arrow_result_stream.hpp"
-#include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
 #include "embedding/native_gpu.hpp"
 #include "embedding/plan_bindings.hpp"
 #include "embedding/result_gpu.hpp"
 #include "embedding/tae_demand.hpp"
+#include "exec/arrow_result_stream.hpp"
 #include "exec/stream_bind_catalog.hpp"   // sirius::exec::stream_bind_catalog
 #include "exec/stream_plan_bindings.hpp"  // sirius::exec::register_stream_source_function
 #include "exec/streaming_fragment.hpp"    // sirius::exec::streaming_fragment, fragment_spec
 #include "from_substrait.hpp"             // duckdb::SubstraitToDuckDB (compiled into libsirius)
 #include "helper/type_conversions.hpp"    // sirius::from_duckdb
 #include "log/logging.hpp"                // SIRIUS_LOG_INFO
-#include "parquet_extension.hpp"          // duckdb::ParquetExtension
-#include "planner/unsupported_optimizers.hpp"
 #include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
 #include "numeric/decimal_import.hpp"
 #include "numeric/decimal_plan.hpp"
+#include "parquet_extension.hpp"  // duckdb::ParquetExtension
 #include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "planner/sirius_physical_plan_generator.hpp"  // sirius::planner::sirius_physical_plan_generator
+#include "planner/unsupported_optimizers.hpp"
 #include "sirius/ffi.hpp"
 #include "sirius_config.hpp"   // sirius::sirius_config
 #include "sirius_context.hpp"  // duckdb::SiriusContext
-
-#include <chrono>
-#include <cstdlib>
 #include "sirius_interface.hpp"
-#include "pipeline/gpu_stream_quiescence_error.hpp"
 #include "substrait/plan.pb.h"
 #include "tae_types.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -121,9 +119,10 @@ double elapsed_ms(std::chrono::steady_clock::time_point since)
 }
 
 // Lower a Substrait plan to a bound+optimized DuckDB LogicalOperator.
-sirius::exec::bound_plan lower_substrait(duckdb::Connection& conn,
-                                         const std::string& substrait_plan,
-                                         duckdb::shared_ptr<duckdb::SubstraitExtensionHandler> extensions = {})
+sirius::exec::bound_plan lower_substrait(
+  duckdb::Connection& conn,
+  const std::string& substrait_plan,
+  duckdb::shared_ptr<duckdb::SubstraitExtensionHandler> extensions = {})
 {
   auto& client = *conn.context;
 
@@ -195,13 +194,22 @@ struct Context::Impl {
   std::size_t embedded_tae_host_staging{64u << 20};
   uint32_t embedded_gpu_streams{2};
 
-  void bring_up(const sirius::parsed_sirius_config& config)
+  void bring_up(const sirius::parsed_sirius_config& config, bool require_single_gpu = false)
   {
     install_log_sink_from_env();
     embedded_metadata_capacity = config.get_embedding_config().metadata_capacity_bytes;
-    embedded_tae_host_staging = config.get_embedding_config().tae_host_staging_bytes;
-    context = duckdb::make_shared_ptr<duckdb::SiriusContext>();
-    context->initialize(config);
+    embedded_tae_host_staging  = config.get_embedding_config().tae_host_staging_bytes;
+    context                    = duckdb::make_shared_ptr<duckdb::SiriusContext>();
+    context->initialize(config, [require_single_gpu](const sirius::sirius_config& resolved) {
+      if (!require_single_gpu) { return; }
+      auto const& spaces = resolved.get_memory_space_configs();
+      if (std::count_if(spaces.begin(), spaces.end(), [](auto const& space) {
+            return std::holds_alternative<cucascade::memory::gpu_memory_space_config>(space);
+          }) != 1) {
+        throw embedding::failure(SIRIUS_UNSUPPORTED,
+                                 "native embedding requires exactly one configured GPU");
+      }
+    });
 
     // Substrait lowering uses core functions and resolves local_files reads to parquet_scan.
     // This context already owns an initialized Sirius runtime. Loading the
@@ -313,10 +321,8 @@ struct EmbeddedPrepared::Impl {
       conn.BeginTransaction();
       for (auto const& name : views) {
         duckdb::DropInfo drop;
-        drop.type         = duckdb::CatalogType::VIEW_ENTRY;
-        drop.catalog      = TEMP_CATALOG;
-        drop.schema       = DEFAULT_SCHEMA;
-        drop.name         = name;
+        drop.type = duckdb::CatalogType::VIEW_ENTRY;
+        drop.SetQualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, duckdb::Identifier(name));
         drop.if_not_found = duckdb::OnEntryNotFound::RETURN_NULL;
         duckdb::Catalog::GetCatalog(*conn.context, TEMP_CATALOG).DropEntry(*conn.context, drop);
       }
@@ -495,7 +501,7 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
       auto view_name = embedded_view_name(generation, read.binding_id);
       auto relation  = impl_->conn->TableFunction(
         function, {duckdb::Value::BIGINT(static_cast<int64_t>(read.binding_id))});
-      relation->CreateView(view_name, true, true);
+      relation->CreateView(duckdb::Identifier(view_name), true, true);
       views.push_back(std::move(view_name));
     }
     auto rewritten = rewrite_embedded_reads(native_bytes, generation);
@@ -537,8 +543,8 @@ std::unique_ptr<EmbeddedPrepared> Context::prepare_embedded(const std::string& b
       *impl_->context, *impl_->conn->context, "native_embedded");
     owner->interface = std::make_unique<sirius::sirius_interface>(
       *impl_->conn->context, std::optional<std::string>("native_embedded"));
-    owner->engine = std::make_unique<sirius::sirius_engine>(
-      *impl_->conn->context, *owner->interface, owner->scope->query_id());
+    owner->engine =
+      std::make_unique<sirius::sirius_engine>(*impl_->conn->context, owner->scope->query_id());
     owner->engine->set_execution_stats(query.stats);
     owner->publisher = std::make_shared<embedding::result_publisher>(
       query.results,
@@ -596,16 +602,9 @@ Context::Context(const std::string& config_path, uint32_t gpu_pipeline_threads)
   : impl_(std::make_unique<Impl>())
 {
   impl_->embedded_gpu_streams = gpu_pipeline_threads;
-  sirius::sirius_config config;
-  config.load_from_file(config_path);
-  auto const& spaces = config.get_memory_space_configs();
-  if (std::count_if(spaces.begin(), spaces.end(), [](auto const& space) {
-        return std::holds_alternative<cucascade::memory::gpu_memory_space_config>(space);
-      }) != 1)
-    throw embedding::failure(SIRIUS_UNSUPPORTED,
-                             "native embedding requires exactly one configured GPU");
-  config.set_gpu_pipeline_executor_threads(gpu_pipeline_threads);
-  impl_->bring_up(config);
+  auto config                 = sirius::parsed_sirius_config::from_file(config_path)
+                  .with_gpu_pipeline_executor_threads(gpu_pipeline_threads);
+  impl_->bring_up(config, true);
 }
 
 void Context::execute_substrait(const std::string& plan, std::uintptr_t out_stream_addr)

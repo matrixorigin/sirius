@@ -41,26 +41,30 @@ uint64_t read_id(duckdb::TableFunctionBindInput& input)
 duckdb::unique_ptr<duckdb::FunctionData> bind_mo(duckdb::ClientContext& context,
                                                  duckdb::TableFunctionBindInput& input,
                                                  duckdb::vector<duckdb::LogicalType>& types,
-                                                 duckdb::vector<std::string>& names)
+                                                 duckdb::vector<duckdb::Identifier>& names)
 {
   auto binding = embedded_catalog_for(context)->get(read_id(input));
   if (!binding.input || binding.tae) throw std::runtime_error("binding is not an MO read");
-  types       = {binding.types.begin(), binding.types.end()};
-  names       = {binding.names.begin(), binding.names.end()};
+  types = {binding.types.begin(), binding.types.end()};
+  for (auto const& name : binding.names)
+    names.emplace_back(name);
   auto data   = duckdb::make_uniq<embedded_mo_bind_data>();
   data->input = std::move(binding.input);
+  data->types = types;
+  data->names = {binding.names.begin(), binding.names.end()};
   return data;
 }
 duckdb::unique_ptr<duckdb::FunctionData> bind_tae(duckdb::ClientContext& context,
                                                   duckdb::TableFunctionBindInput& input,
                                                   duckdb::vector<duckdb::LogicalType>& types,
-                                                  duckdb::vector<std::string>& names)
+                                                  duckdb::vector<duckdb::Identifier>& names)
 {
   auto binding = embedded_catalog_for(context)->get(read_id(input));
   if (!binding.tae || !binding.tae_host_budget || binding.input)
     throw std::runtime_error("binding is not a complete TAE read");
-  types             = {binding.types.begin(), binding.types.end()};
-  names             = {binding.names.begin(), binding.names.end()};
+  types = {binding.types.begin(), binding.types.end()};
+  for (auto const& name : binding.names)
+    names.emplace_back(name);
   auto data         = duckdb::make_uniq<embedded_tae_bind_data>();
   data->manifest    = std::move(binding.tae);
   data->host_budget = std::move(binding.tae_host_budget);
@@ -72,17 +76,21 @@ void never_execute(duckdb::ClientContext&, duckdb::TableFunctionInput&, duckdb::
   throw std::runtime_error("embedded read marker cannot execute in DuckDB");
 }
 }  // namespace
+duckdb::TableFunction get_embedded_read_function(bool tae)
+{
+  duckdb::TableFunction fn(tae ? embedded_tae_function : embedded_mo_function,
+                           {duckdb::LogicalType::BIGINT},
+                           never_execute,
+                           tae ? bind_tae : bind_mo);
+  fn.projection_pushdown = true;
+  fn.filter_pushdown     = true;
+  return fn;
+}
 void register_embedded_read_functions(duckdb::DatabaseInstance& instance)
 {
   auto transaction = duckdb::CatalogTransaction::GetSystemTransaction(instance);
   auto& catalog    = duckdb::Catalog::GetSystemCatalog(instance);
-  for (auto fn :
-       {duckdb::TableFunction(
-          embedded_mo_function, {duckdb::LogicalType::BIGINT}, never_execute, bind_mo),
-        duckdb::TableFunction(
-          embedded_tae_function, {duckdb::LogicalType::BIGINT}, never_execute, bind_tae)}) {
-    fn.projection_pushdown = true;
-    fn.filter_pushdown     = true;
+  for (auto fn : {get_embedded_read_function(false), get_embedded_read_function(true)}) {
     duckdb::CreateTableFunctionInfo info(fn);
     info.on_conflict = duckdb::OnCreateConflict::IGNORE_ON_CONFLICT;
     catalog.CreateTableFunction(transaction, info);

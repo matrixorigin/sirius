@@ -36,11 +36,11 @@
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "embedding/native_gpu.hpp"
+#include "embedding/plan_bindings.hpp"
 #include "expression/ast/utils.hpp"
 #include "helper/type_conversions.hpp"
 #include "io/s3/duckdb_secret_config.hpp"
-#include "embedding/native_gpu.hpp"
-#include "embedding/plan_bindings.hpp"
 #include "io/uri_parser.hpp"
 #include "log/logging.hpp"
 #include "numeric/decimal_types.hpp"
@@ -624,9 +624,10 @@ std::unique_ptr<sirius::op::scan::tae_ingestible_table_info> build_tae_table_inf
       "[sirius_physical_plan_generator::build_tae_table_info] tae_scan has no bind data");
   }
 
-  auto info = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
+  auto info         = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
+  info->contract_id = scan_op.contract_id;
   duckdb::unique_ptr<duckdb::FunctionData> copied_bind_data;
-  if (scan_op.function.name == sirius::embedding::embedded_tae_function) {
+  if (scan_op.function.GetName() == sirius::embedding::embedded_tae_function) {
     auto const* embedded =
       dynamic_cast<const sirius::embedding::embedded_tae_bind_data*>(scan_op.bind_data.get());
     if (!embedded || !embedded->manifest || !embedded->host_budget)
@@ -1072,6 +1073,8 @@ void certify_table_scan(duckdb::unique_ptr<sirius::op::sirius_physical_operator>
     materializer_kind = sirius::op::scan::materializer_kind::duckdb_native;
   } else if (entry->kind == sirius::op::scan::source_kind::tae) {
     materializer_kind = sirius::op::scan::materializer_kind::tae;
+  } else if (entry->kind == sirius::op::scan::source_kind::embedded_mo) {
+    materializer_kind = sirius::op::scan::materializer_kind::stream;
   } else if (entry->function_name == "iceberg_scan") {
     materializer_kind = sirius::op::scan::materializer_kind::iceberg;
   }
@@ -1663,6 +1666,26 @@ bool compressed_materialization_active(duckdb::ClientContext& context)
 
 }  // namespace
 
+duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_embedded_mo_scan(
+  sirius::op::sirius_physical_table_scan& scan,
+  sirius::operator_params const&,
+  duckdb::ClientContext& context,
+  sirius::op::scan::dynamic_filter_apply_mode)
+{
+  auto const* bind = dynamic_cast<embedding::embedded_mo_bind_data const*>(scan.bind_data.get());
+  if (!bind || !bind->input) throw std::runtime_error("MO scan has no native input");
+  auto state = context.registered_state
+                 ? context.registered_state->Get<duckdb::SiriusContext>("sirius_state")
+                 : nullptr;
+  return duckdb::make_uniq<op::scan::sirius_gpu_scan_operator>(
+    scan.types,
+    scan.estimated_cardinality,
+    embedding::make_native_ingestible(bind->input, scan.contract_id),
+    scan.contract_id,
+    state.get(),
+    scan.read_views);
+}
+
 duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_tae_scan(
   sirius::op::sirius_physical_table_scan& scan,
   sirius::operator_params const& op_params,
@@ -1670,8 +1693,10 @@ duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_tae_scan(
   sirius::op::scan::dynamic_filter_apply_mode mode)
 {
   auto state = context.registered_state
-    ? context.registered_state->Get<duckdb::SiriusContext>("sirius_state") : nullptr;
-  return make_gpu_scan_leaf(build_tae_table_info(scan, context), scan, op_params, mode, state.get());
+                 ? context.registered_state->Get<duckdb::SiriusContext>("sirius_state")
+                 : nullptr;
+  return make_gpu_scan_leaf(
+    build_tae_table_info(scan, context), scan, op_params, mode, state.get());
 }
 
 duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_native_scan(
