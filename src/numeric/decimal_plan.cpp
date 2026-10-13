@@ -7,6 +7,7 @@
 #include "numeric/decimal_import.hpp"
 #include "substrait/plan.pb.h"
 
+#include <duckdb/execution/expression_executor.hpp>
 #include <duckdb/planner/column_binding_map.hpp>
 #include <duckdb/planner/expression/bound_aggregate_expression.hpp>
 #include <duckdb/planner/expression/bound_case_expression.hpp>
@@ -474,43 +475,59 @@ std::string normalize_exact_substrait(std::string_view bytes, std::size_t schema
     throw std::invalid_argument("normalized exact plan exceeds 16 MiB");
   return v.plan.SerializeAsString();
 }
+void fold_exact_import_constants(duckdb::ClientContext& context,
+                                 duckdb::unique_ptr<duckdb::Expression>& expression)
+{
+  duckdb::ExpressionIterator::EnumerateChildren(*expression,
+                                                [&](duckdb::unique_ptr<duckdb::Expression>& child) {
+                                                  fold_exact_import_constants(context, child);
+                                                });
+  if (from_duckdb_type(expression->GetReturnType()) && expression->IsFoldable() &&
+      expression->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+    expression = duckdb::make_uniq<duckdb::BoundConstantExpression>(
+      duckdb::ExpressionExecutor::EvaluateScalar(context, *expression));
+  }
+}
 void restore_exact_bound_types(duckdb::unique_ptr<duckdb::Expression>& expression)
 {
   duckdb::ExpressionIterator::EnumerateChildren(
     *expression,
     [](duckdb::unique_ptr<duckdb::Expression>& child) { restore_exact_bound_types(child); });
-  if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CAST) {
-    auto& cast  = expression->Cast<duckdb::BoundCastExpression>();
-    auto source = from_duckdb_type(cast.child->return_type);
+  if (duckdb::BoundCastExpression::IsCast(*expression)) {
+    auto& cast = expression->Cast<duckdb::BoundFunctionExpression>();
+    auto source =
+      from_duckdb_type(duckdb::BoundCastExpression::ChildMutable(cast)->GetReturnType());
     if (source) {
-      auto plain = duckdb_type(*source);
-      plain.SetAlias("");
-      auto target = from_duckdb_type(cast.return_type);
+      auto plain  = duckdb_type(*source);
+      plain       = plain.WithAlias("");
+      auto target = from_duckdb_type(cast.GetReturnType());
       // All wire-level MO casts were checked versioned functions. These
       // BoundCast nodes are DuckDB's conditional alias/nullability coercions;
       // restore the original declared branch rather than a generic STRUCT cast.
-      if (plain == cast.return_type || cast.child->return_type == cast.return_type ||
+      if (plain == cast.GetReturnType() ||
+          duckdb::BoundCastExpression::ChildMutable(cast)->GetReturnType() ==
+            cast.GetReturnType() ||
           (target && same_decimal(*source, *target)))
-        expression = std::move(cast.child);
+        expression = std::move(duckdb::BoundCastExpression::ChildMutable(cast));
     }
   }
   std::vector<duckdb::Expression*> branches;
   bool coalesce = false;
   if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CASE) {
     auto& c = expression->Cast<duckdb::BoundCaseExpression>();
-    for (auto& branch : c.case_checks)
+    for (auto& branch : c.CaseChecksMutable())
       branches.push_back(branch.then_expr.get());
-    branches.push_back(c.else_expr.get());
+    branches.push_back(c.ElseMutable().get());
   } else if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_OPERATOR &&
              expression->GetExpressionType() == duckdb::ExpressionType::OPERATOR_COALESCE) {
     coalesce = true;
-    for (auto& child : expression->Cast<duckdb::BoundOperatorExpression>().children)
+    for (auto& child : expression->Cast<duckdb::BoundOperatorExpression>().GetChildrenMutable())
       branches.push_back(child.get());
   }
   std::optional<logical_type> result;
   bool nullable = coalesce;
   for (auto branch : branches) {
-    auto t = from_duckdb_type(branch->return_type);
+    auto t = from_duckdb_type(branch->GetReturnType());
     if (!t || !t->is_mo_decimal()) {
       result.reset();
       break;
@@ -523,7 +540,7 @@ void restore_exact_bound_types(duckdb::unique_ptr<duckdb::Expression>& expressio
     else
       nullable |= t->nullability() == 2;
   }
-  if (result) expression->return_type = duckdb_type(result->with_nullability(nullable));
+  if (result) expression->SetReturnType(duckdb_type(result->with_nullability(nullable)));
 }
 namespace {
 duckdb::ExpressionType comparison_type(decimal_op op)
@@ -546,22 +563,25 @@ void rewrite_expression(duckdb::unique_ptr<duckdb::Expression>& expression, bool
     [&](duckdb::unique_ptr<duckdb::Expression>& child) { rewrite_expression(child, comparisons); });
   if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION) {
     auto& fn = expression->Cast<duckdb::BoundFunctionExpression>();
-    auto id  = from_duckdb_function_name(fn.function.name);
+    auto id  = from_duckdb_function_name(fn.Function().GetName().GetIdentifierName());
     if (id && is_decimal_function(*id)) {
       validate_bound_scalar(fn);
       if (operation(*id) == decimal_op::cast &&
-          sirius::from_duckdb(fn.children[0]->return_type) == sirius::from_duckdb(fn.return_type)) {
-        expression = std::move(fn.children[0]);
+          sirius::from_duckdb(fn.GetChildrenMutable()[0]->GetReturnType()) ==
+            sirius::from_duckdb(fn.GetReturnType())) {
+        expression = std::move(fn.GetChildrenMutable()[0]);
       } else if (comparisons && operation(*id) >= decimal_op::equal) {
-        auto output = fn.return_type;
-        expression  = duckdb::make_uniq<duckdb::BoundComparisonExpression>(
-          comparison_type(operation(*id)), std::move(fn.children[0]), std::move(fn.children[1]));
-        expression->return_type = std::move(output);
+        auto output = fn.GetReturnType();
+        expression =
+          duckdb::BoundComparisonExpression::Create(comparison_type(operation(*id)),
+                                                    std::move(fn.GetChildrenMutable()[0]),
+                                                    std::move(fn.GetChildrenMutable()[1]));
+        expression->SetReturnType(std::move(output));
       }
     }
   } else if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_AGGREGATE) {
     auto& agg = expression->Cast<duckdb::BoundAggregateExpression>();
-    auto id   = from_duckdb_aggregate_name(agg.function.name);
+    auto id   = from_duckdb_aggregate_name(agg.Function().GetName().GetIdentifierName());
     if (id && is_decimal_aggregate(*id)) validate_bound_aggregate(agg);
   }
 }
@@ -582,13 +602,13 @@ void rewrite_exact_comparisons(duckdb::unique_ptr<duckdb::LogicalOperator>& plan
   std::function<void(duckdb::unique_ptr<duckdb::Expression>&)> restore_references;
   restore_references = [&](duckdb::unique_ptr<duckdb::Expression>& expression) {
     if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_COLUMN_REF &&
-        !from_duckdb_type(expression->return_type)) {
+        !from_duckdb_type(expression->GetReturnType())) {
       auto& ref  = expression->Cast<duckdb::BoundColumnRefExpression>();
-      auto found = bindings.find(ref.binding);
+      auto found = bindings.find(ref.Binding());
       if (found != bindings.end() && from_duckdb_type(found->second)) {
         auto plain = duckdb_type(*from_duckdb_type(found->second));
-        plain.SetAlias("");
-        if (plain == ref.return_type) ref.return_type = found->second;
+        plain      = plain.WithAlias("");
+        if (plain == ref.GetReturnType()) ref.SetReturnType(found->second);
       }
     }
     duckdb::ExpressionIterator::EnumerateChildren(*expression, restore_references);
@@ -599,25 +619,24 @@ void rewrite_exact_comparisons(duckdb::unique_ptr<duckdb::LogicalOperator>& plan
   bool comparisons = plan->type == duckdb::LogicalOperatorType::LOGICAL_ANY_JOIN;
   duckdb::LogicalOperatorVisitor::EnumerateExpressions(
     *plan, [&](duckdb::unique_ptr<duckdb::Expression>* expression) {
+      fold_exact_import_constants(context, *expression);
       restore_exact_bound_types(*expression);
       rewrite_expression(*expression, comparisons);
     });
   if (plan->type == duckdb::LogicalOperatorType::LOGICAL_ANY_JOIN) {
     auto& join = plan->Cast<duckdb::LogicalAnyJoin>();
     if (join.condition->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT &&
-        join.condition->return_type.id() == duckdb::LogicalTypeId::BOOLEAN &&
-        !join.condition->Cast<duckdb::BoundConstantExpression>().value.IsNull() &&
-        join.condition->Cast<duckdb::BoundConstantExpression>().value.GetValue<bool>()) {
+        join.condition->GetReturnType().id() == duckdb::LogicalTypeId::BOOLEAN &&
+        !join.condition->Cast<duckdb::BoundConstantExpression>().GetValue().IsNull() &&
+        join.condition->Cast<duckdb::BoundConstantExpression>().GetValue().GetValue<bool>()) {
       // Exact plans skip DuckDB's ordinary optimizer. JOIN ON true otherwise
       // remains an unsupported ANY_JOIN. Equal constant keys use the existing
       // GPU join, retaining multiplicity and outer NULLs even for empty sides.
       auto replacement = duckdb::make_uniq<duckdb::LogicalComparisonJoin>(join.join_type);
-      duckdb::JoinCondition condition;
-      condition.comparison = duckdb::ExpressionType::COMPARE_EQUAL;
-      condition.left =
-        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1));
-      condition.right =
-        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1));
+      duckdb::JoinCondition condition(
+        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1)),
+        duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::TINYINT(1)),
+        duckdb::ExpressionType::COMPARE_EQUAL);
       replacement->conditions.push_back(std::move(condition));
       replacement->children             = std::move(join.children);
       replacement->left_projection_map  = std::move(join.left_projection_map);
@@ -636,10 +655,11 @@ void rewrite_exact_comparisons(duckdb::unique_ptr<duckdb::LogicalOperator>& plan
   if (plan->type == duckdb::LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
     auto& join = plan->Cast<duckdb::LogicalComparisonJoin>();
     for (auto const& condition : join.conditions) {
-      auto left  = from_duckdb_type(condition.left->return_type),
-           right = from_duckdb_type(condition.right->return_type);
+      if (!condition.IsComparison()) continue;
+      auto left  = from_duckdb_type(condition.GetLHS().GetReturnType()),
+           right = from_duckdb_type(condition.GetRHS().GetReturnType());
       if (((left && left->is_mo_decimal()) || (right && right->is_mo_decimal())) &&
-          condition.comparison != duckdb::ExpressionType::COMPARE_EQUAL)
+          condition.GetComparisonType() != duckdb::ExpressionType::COMPARE_EQUAL)
         throw std::invalid_argument("MO decimal joins require exact equality keys");
     }
   }

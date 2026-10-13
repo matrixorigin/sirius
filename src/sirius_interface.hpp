@@ -22,7 +22,6 @@
 #include "sirius_engine.hpp"
 
 #include <memory>
-
 #include <optional>
 
 namespace sirius {

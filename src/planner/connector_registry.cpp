@@ -15,14 +15,15 @@
  */
 
 #include "planner/connector_registry.hpp"
-#include "op/scan/tae_scan_plan.hpp"
 
+#include "embedding/plan_bindings.hpp"
 #include "exec/stream_plan_bindings.hpp"
 #include "helper/type_conversions.hpp"
 #include "log/logging.hpp"
 #include "op/scan/duckdb_native_metadata.hpp"
 #include "op/scan/dynamic_filter_merge.hpp"
 #include "op/scan/field_id_mapping.hpp"
+#include "op/scan/tae_scan_plan.hpp"
 #include "op/sirius_physical_table_scan.hpp"
 #include "planner/connector_reference_cache.hpp"
 #include "planner/duckdb_host.hpp"
@@ -243,13 +244,24 @@ op::scan::certification_result supported_native(op::scan::bound_table_scan const
 }
 
 op::scan::certification_result supported_tae(op::scan::bound_table_scan const&,
-  op::sirius_physical_table_scan const& scan, duckdb::ClientContext&, scan_contract_provenance&)
+                                             op::sirius_physical_table_scan const& scan,
+                                             duckdb::ClientContext&,
+                                             scan_contract_provenance&)
 {
   auto const* bind = dynamic_cast<tae::TAEScanBindData const*>(scan.bind_data.get());
+  if (!bind) {
+    auto const* embedded =
+      dynamic_cast<embedding::embedded_tae_bind_data const*>(scan.bind_data.get());
+    if (embedded) bind = embedded->manifest.get();
+  }
   if (!bind) throw std::runtime_error("TAE scan has no verified bind data");
   auto filters = scan.table_filters ? scan.table_filters->Copy() : nullptr;
-  (void)op::scan::build_tae_scan_plan(*bind, scan.column_ids, scan.projection_ids,
-    scan.returned_types, scan.types.size(), filters.get());
+  (void)op::scan::build_tae_scan_plan(*bind,
+                                      scan.column_ids,
+                                      scan.projection_ids,
+                                      scan.returned_types,
+                                      scan.types.size(),
+                                      filters.get());
   op::scan::certification_result result;
   result.verdict = op::scan::eligibility_verdict::supported;
   return result;
@@ -257,18 +269,18 @@ op::scan::certification_result supported_tae(op::scan::bound_table_scan const&,
 
 connector make_tae_scan_connector()
 {
-  return {.function_name = "tae_scan",
-          .kind = kind::tae,
-          .registry_profile = "sirius.tae.v1",
-          .bind_data_matches = matches_bind<tae::TAEScanBindData>,
-          .lower = lower_tae_scan,
-          .filter_mode = mode::INCLUDE_AST_ROW_MASKS,
-          .byte_source = bytes::local_file,
-          .permits_cpu_replay = true,
+  return {.function_name              = "tae_scan",
+          .kind                       = kind::tae,
+          .registry_profile           = "sirius.tae.v1",
+          .bind_data_matches          = matches_bind<tae::TAEScanBindData>,
+          .lower                      = lower_tae_scan,
+          .filter_mode                = mode::INCLUDE_AST_ROW_MASKS,
+          .byte_source                = bytes::local_file,
+          .permits_cpu_replay         = true,
           .selector_outside_bind_data = false,
-          .decline_reason = nullptr,
-          .provider = std::nullopt,
-          .certify = supported_tae};
+          .decline_reason             = nullptr,
+          .provider                   = std::nullopt,
+          .certify                    = supported_tae};
 }
 
 connector make_seq_scan_connector()
@@ -367,7 +379,45 @@ connector make_sirius_stream_source_connector()
           .certify                    = nullptr};
 }
 
-std::array<connector, 7> const entries{make_tae_scan_connector(),
+op::scan::certification_result supported_embedded_mo(op::scan::bound_table_scan const&,
+                                                     op::sirius_physical_table_scan const& scan,
+                                                     duckdb::ClientContext&,
+                                                     scan_contract_provenance&)
+{
+  auto const* bind = dynamic_cast<embedding::embedded_mo_bind_data const*>(scan.bind_data.get());
+  if (!bind || !bind->input) throw std::runtime_error("MO scan has no native input");
+  op::scan::certification_result result;
+  result.verdict = op::scan::eligibility_verdict::supported;
+  return result;
+}
+connector make_embedded_mo_connector()
+{
+  return {.function_name              = embedding::embedded_mo_function,
+          .kind                       = kind::embedded_mo,
+          .registry_profile           = "sirius.embedded_mo.v1",
+          .bind_data_matches          = matches_bind<embedding::embedded_mo_bind_data>,
+          .lower                      = lower_embedded_mo_scan,
+          .filter_mode                = mode::MEMBERSHIP_MASKS_ONLY,
+          .byte_source                = bytes::stream,
+          .permits_cpu_replay         = false,
+          .selector_outside_bind_data = false,
+          .decline_reason             = nullptr,
+          .provider                   = std::nullopt,
+          .certify                    = supported_embedded_mo};
+}
+connector make_embedded_tae_connector()
+{
+  auto result               = make_tae_scan_connector();
+  result.function_name      = embedding::embedded_tae_function;
+  result.registry_profile   = "sirius.embedded_tae.v1";
+  result.bind_data_matches  = matches_bind<embedding::embedded_tae_bind_data>;
+  result.permits_cpu_replay = false;
+  return result;
+}
+
+std::array<connector, 9> const entries{make_embedded_mo_connector(),
+                                       make_embedded_tae_connector(),
+                                       make_tae_scan_connector(),
                                        make_seq_scan_connector(),
                                        make_parquet_scan_connector(),
                                        make_read_parquet_connector(),
@@ -469,6 +519,10 @@ duckdb::vector<duckdb::TableFunction> reference_functions(std::string const& nam
     return parquet_reference_functions(db, name);
   }
   if (name == "sirius_read_parquet") return {duckdb::GetSiriusReadParquetFunction()};
+  if (name == embedding::embedded_mo_function)
+    return {embedding::get_embedded_read_function(false)};
+  if (name == embedding::embedded_tae_function)
+    return {embedding::get_embedded_read_function(true)};
   if (name == "tae_scan") return {tae::GetTAEScanFunction()};
   if (name == "sirius_stream_source") return {exec::get_stream_source_function()};
   // Iceberg is initialized at extension load, never during a planning lookup.

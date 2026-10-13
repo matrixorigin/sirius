@@ -82,7 +82,10 @@ struct native_split final : op::scan::scan_info {
 };
 class native_ingestible final : public op::scan::gpu_ingestible {
  public:
-  explicit native_ingestible(std::shared_ptr<native_input> p) : input_(std::move(p)) {}
+  explicit native_ingestible(std::shared_ptr<native_input> p, uint64_t contract_id)
+    : input_(std::move(p)), contract_id_(contract_id)
+  {
+  }
   bool is_live() const noexcept override { return true; }
   bool live_ready() const override { return input_->ready(); }
   bool live_exhausted() const override
@@ -98,8 +101,9 @@ class native_ingestible final : public op::scan::gpu_ingestible {
   {
     auto unit = input_->claim();
     if (!unit) return nullptr;
-    return std::make_unique<op::scan::scan_operator_input>(
-      std::make_unique<native_split>(std::move(unit)));
+    auto split = std::make_unique<native_split>(std::move(unit));
+    split->set_contract_payload(contract_id_, {}, {});
+    return std::make_unique<op::scan::scan_operator_input>(std::move(split));
   }
   std::unique_ptr<op::scan::batch_coalescer> create_batch_coalescer() const override
   {
@@ -144,6 +148,7 @@ class native_ingestible final : public op::scan::gpu_ingestible {
 
  private:
   std::shared_ptr<native_input> input_;
+  uint64_t contract_id_;
   native_info info_;
 };
 }  // namespace
@@ -160,9 +165,13 @@ void activate_native_inputs(input_registry& inputs, cucascade::memory::memory_sp
   for (std::size_t i = 0; i < pools.size(); ++i)
     inputs.reads[i]->activate(std::move(pools[i]));
 }
-std::shared_ptr<op::scan::gpu_ingestible> make_native_ingestible(
-  std::shared_ptr<native_input> input)
+bool is_native_input_split(op::scan::scan_info const& split) noexcept
 {
-  return std::make_shared<native_ingestible>(std::move(input));
+  return dynamic_cast<native_split const*>(&split) != nullptr;
+}
+std::shared_ptr<op::scan::gpu_ingestible> make_native_ingestible(
+  std::shared_ptr<native_input> input, uint64_t contract_id)
+{
+  return std::make_shared<native_ingestible>(std::move(input), contract_id);
 }
 }  // namespace sirius::embedding

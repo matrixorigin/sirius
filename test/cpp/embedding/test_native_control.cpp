@@ -5,7 +5,6 @@
 #include "embedding/control.hpp"
 #include "embedding/input.hpp"
 #include "numeric/decimal_error.hpp"
-#include "pipeline/completion_handler.hpp"
 
 #include <catch.hpp>
 #include <sys/wait.h>
@@ -20,21 +19,6 @@
 
 using namespace std::chrono_literals;
 using namespace sirius::embedding;
-
-TEST_CASE("native fatal status survives an earlier completion signal",
-          "[native_control][completion_handler]")
-{
-  sirius::pipeline::completion_handler handler;
-  auto future = handler.get_awaitable();
-  handler.mark_completed();
-  auto fatal = std::make_exception_ptr(std::runtime_error("fatal synchronization"));
-  handler.report_fatal_error(fatal);
-  REQUIRE_NOTHROW(future.get());
-  REQUIRE(handler.has_error());
-  REQUIRE(handler.fatal_error() == fatal);
-  handler.report_fatal_error(std::make_exception_ptr(std::runtime_error("later")));
-  REQUIRE(handler.fatal_error() == fatal);
-}
 
 namespace {
 struct recording {

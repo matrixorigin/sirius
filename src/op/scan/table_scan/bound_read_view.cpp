@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-#include "op/scan/table_scan/bound_read_view.hpp"
-
+#include "embedding/plan_bindings.hpp"
 #include "exec/stream_plan_bindings.hpp"
 #include "helper/type_conversions.hpp"
+#include "op/scan/table_scan/bound_read_view.hpp"
 #include "op/sirius_physical_table_scan.hpp"
 #include "planner/connector_registry.hpp"
 #include "sirius_registration.hpp"
@@ -388,6 +388,11 @@ bound_read_view capture(capture_input input, duckdb::ClientContext& context)
       context.transaction.GetActiveQuery(), view.transaction_id, &context, &table.GetStorage()};
   } else if (source->kind == source_kind::tae) {
     auto const* typed = dynamic_cast<tae::TAEScanBindData const*>(input.bind_data);
+    if (!typed) {
+      auto const* embedded =
+        dynamic_cast<embedding::embedded_tae_bind_data const*>(input.bind_data);
+      if (embedded) typed = embedded->manifest.get();
+    }
     if (!typed) throw std::runtime_error("TAE capture has no TAEScanBindData");
     identity.bound_types.assign(typed->all_col_types.begin(), typed->all_col_types.end());
     identity.bound_names.assign(typed->all_col_names.begin(), typed->all_col_names.end());
@@ -396,22 +401,35 @@ bound_read_view capture(capture_input input, duckdb::ClientContext& context)
     append(selector, 'd', typed->db_name);
     append(selector, 't', typed->table_name);
     number(selector, typed->sort_column_idx);
-    for (auto value : typed->all_col_mo_oids) number(selector, value);
-    for (auto value : typed->all_col_widths) number(selector, value);
-    for (auto value : typed->all_col_scales) number(selector, value);
-    for (auto value : typed->all_col_seqnums) number(selector, value);
+    for (auto value : typed->all_col_mo_oids)
+      number(selector, value);
+    for (auto value : typed->all_col_widths)
+      number(selector, value);
+    for (auto value : typed->all_col_scales)
+      number(selector, value);
+    for (auto value : typed->all_col_seqnums)
+      number(selector, value);
     for (auto const& object : typed->objects) {
-      owned_paths.push_back(duckdb::FileSystem::JoinPath(typed->data_dir, object.file_path));
+      owned_paths.push_back(
+        duckdb::FileSystem::GetFileSystem(context).JoinPath(typed->data_dir, object.file_path));
       append(selector, 'p', object.file_path);
       number(selector, object.rows);
       number(selector, object.blocks);
       number(selector, object.size_bytes);
-      append(selector, 'z', std::string(reinterpret_cast<char const*>(object.sort_key_zm.data()),
-                                       object.sort_key_zm.size()));
+      append(selector,
+             'z',
+             std::string(reinterpret_cast<char const*>(object.sort_key_zm.data()),
+                         object.sort_key_zm.size()));
     }
-    paths = {owned_paths, {}};
-    path_info = analyze_paths(paths);
+    paths              = {owned_paths, {}};
+    path_info          = analyze_paths(paths);
     identity.data_view = file_inventory{static_cast<uint32_t>(paths.size())};
+  } else if (source->kind == source_kind::embedded_mo) {
+    auto const* typed = dynamic_cast<embedding::embedded_mo_bind_data const*>(input.bind_data);
+    if (!typed || !typed->input) throw std::runtime_error("MO capture has no native input");
+    identity.bound_types = typed->types;
+    identity.bound_names = typed->names;
+    identity.data_view   = stream_identity{typed->input->id};
   } else if (source->kind == source_kind::stream_source) {
     auto const* typed = dynamic_cast<exec::stream_source_bind_data const*>(input.bind_data);
     if (!typed) throw std::runtime_error("stream capture has no stream_source_bind_data");

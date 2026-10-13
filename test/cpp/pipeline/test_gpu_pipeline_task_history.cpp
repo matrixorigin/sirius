@@ -140,7 +140,7 @@ class injected_quiescence_failure_task final : public sirius::pipeline::gpu_pipe
   void synchronize_task_stream(::cuda::stream_ref stream) override
   {
     if (++_synchronize_attempts == 1) {
-      stream.synchronize();
+      stream.sync();
       return;
     }
     _input_was_alive_during_quiescence = !_expected_input.expired();
@@ -2123,4 +2123,19 @@ TEST_CASE(
   }
   retry.reset();
   REQUIRE(source_lifetime.expired());
+}
+
+TEST_CASE("native fatal status survives an earlier completion signal",
+          "[native_control][completion_handler]")
+{
+  sirius::pipeline::completion_handler handler;
+  auto future = handler.get_awaitable();
+  handler.mark_completed();
+  auto fatal = std::make_exception_ptr(std::runtime_error("fatal synchronization"));
+  handler.report_fatal_error(fatal);
+  REQUIRE_NOTHROW(future.get());
+  REQUIRE(handler.has_error());
+  REQUIRE(handler.fatal_error() == fatal);
+  handler.report_fatal_error(std::make_exception_ptr(std::runtime_error("later")));
+  REQUIRE(handler.fatal_error() == fatal);
 }

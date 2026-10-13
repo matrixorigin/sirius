@@ -1,26 +1,29 @@
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 # Reuse the existing end-to-end TAE cases without rebuilding unrelated test
 # operators.
 add_executable(
   sirius_native_tae_unittest
+  src/sirius_extension_entry.cpp
+  test/cpp/utils/sirius_extension_loader.cpp
   test/cpp/exec/execution_evidence_unittest.cpp
   test/cpp/integration/test_gpu_execution_tae_scan.cpp
   test/cpp/utils/sirius_test_env.cpp)
 target_compile_features(sirius_native_tae_unittest PRIVATE cxx_std_20)
 target_include_directories(
   sirius_native_tae_unittest
-  PRIVATE
-    "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include")
+  PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
+          "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/src"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include")
 target_compile_definitions(
   sirius_native_tae_unittest
   PRIVATE SIRIUS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(sirius_native_tae_unittest sirius_core duckdb_static
-                      Threads::Threads)
-sirius_link_duckdb_extensions(sirius_native_tae_unittest)
+target_link_libraries(sirius_native_tae_unittest
+                      PRIVATE sirius_core duckdb_static Threads::Threads)
+sirius_link_duckdb_extensions(sirius_native_tae_unittest PRIVATE)
 
 # Control/credit tests need neither a GPU nor DuckDB initialization. The C
 # consumer below separately proves the real static dependency/link boundary.
@@ -31,8 +34,9 @@ add_executable(
   test/cpp/embedding/test_decimal_aggregate.cpp)
 target_compile_features(sirius_exact_decimal_unittest PRIVATE cxx_std_20)
 target_include_directories(
-  sirius_exact_decimal_unittest PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
-                                        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  sirius_exact_decimal_unittest
+  PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 add_executable(sirius_exact_decimal_benchmark EXCLUDE_FROM_ALL
                bench/mo_exact_decimal.cpp)
@@ -87,6 +91,7 @@ add_executable(
   test/cpp/exec/execution_evidence_unittest.cpp
   test/cpp/embedding/test_native_binding.cpp
   test/cpp/embedding/test_decimal_import.cpp
+  substrait/test/c/test_extension_import.cpp
   test/cpp/expression/test_function_id.cpp
   test/cpp/helper/test_logical_type.cpp
   src/embedding/plan.cpp)
@@ -126,20 +131,19 @@ target_include_directories(
 target_compile_definitions(
   sirius_native_gpu_unittest
   PRIVATE SIRIUS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(
-  sirius_native_gpu_unittest
-  PRIVATE sirius_core duckdb_static dummy_static_extension_loader
-          Threads::Threads)
+target_link_libraries(sirius_native_gpu_unittest
+                      PRIVATE sirius_core duckdb_static Threads::Threads)
 set_target_properties(sirius_c_smoke PROPERTIES C_STANDARD 99 LINKER_LANGUAGE
                                                               CXX)
 target_link_libraries(sirius_c_smoke PRIVATE Sirius::embed)
 set_property(
   TARGET sirius_c_smoke
   APPEND
-  PROPERTY LINK_DEPENDS
-           "${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_embed_link.py"
-           "${CMAKE_CURRENT_SOURCE_DIR}/proto/matrixone/sirius/numeric/v1/exact_decimal.proto"
-           "${CMAKE_CURRENT_SOURCE_DIR}/src/sirius_c.h")
+  PROPERTY
+    LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/export_embed_link.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/proto/matrixone/sirius/numeric/v1/exact_decimal.proto"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sirius_c.h")
 add_custom_command(
   TARGET sirius_c_smoke
   POST_BUILD
@@ -152,5 +156,25 @@ add_custom_command(
     "${CMAKE_CURRENT_BINARY_DIR}/embedding-sdk"
   VERBATIM)
 
+target_sources(
+  sirius_native_control_unittest
+  PRIVATE test/cpp/embedding/test_native_execution_stats.cpp
+          src/embedding/execution_stats.cpp)
 
-target_sources(sirius_native_control_unittest PRIVATE test/cpp/embedding/test_native_execution_stats.cpp src/embedding/execution_stats.cpp)
+# Match the standalone engine's Catch2 v3 runner and dependency headers.
+foreach(
+  target
+  sirius_native_tae_unittest sirius_exact_decimal_unittest
+  sirius_native_control_unittest sirius_native_binding_unittest
+  sirius_native_gpu_unittest sirius_native_numeric_unittest)
+  target_include_directories(${target} BEFORE
+                             PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp")
+  target_link_libraries(${target} PRIVATE Catch2::Catch2)
+endforeach()
+target_include_directories(
+  sirius_native_control_unittest
+  PRIVATE "${SIRIUS_DUCKDB_SOURCE_DIR}/src/include"
+          "${CMAKE_CURRENT_SOURCE_DIR}/include")
+foreach(target sirius_native_binding_unittest sirius_native_gpu_unittest)
+  sirius_link_duckdb_extensions(${target} PRIVATE)
+endforeach()

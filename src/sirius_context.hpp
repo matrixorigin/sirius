@@ -472,7 +472,9 @@ class SiriusContext : public ClientContextState {
                                             RebindQueryInfo current_rebind) final;
 
   /// \brief Initialize the Sirius context with the given configuration.
-  void initialize(const sirius::parsed_sirius_config& config);
+  /// The optional validator runs after topology resolution and before allocating runtime resources.
+  void initialize(const sirius::parsed_sirius_config& config,
+                  std::function<void(const sirius::sirius_config&)> validate = {});
 
   /**
    * @brief Suppress QueryBegin/QueryEnd side-effects for internal DuckDB connections.

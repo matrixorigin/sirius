@@ -518,9 +518,16 @@ target_include_directories(
   sirius_execution_evidence_unittest
   PRIVATE ${SIRIUS_DUCKDB_SOURCE_DIR}/third_party/catch
           ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(sirius_execution_evidence_unittest Threads::Threads)
+target_link_libraries(sirius_execution_evidence_unittest
+                      PRIVATE Threads::Threads)
 set_target_properties(
   sirius_execution_evidence_unittest
   PROPERTIES CXX_STANDARD 20
              CXX_STANDARD_REQUIRED ON
              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test/cpp")
+
+target_include_directories(sirius_execution_evidence_unittest BEFORE
+                           PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/cpp")
+target_link_libraries(sirius_execution_evidence_unittest PRIVATE Catch2::Catch2)
+target_include_directories(
+  sirius_unittest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tae-scanner/include")

@@ -768,6 +768,7 @@ TEST_CASE("production grouped exact and ordinary slots finalize through the pipe
   engine engine;
   for (bool count : {false, true})
     for (bool ordered : {false, true}) {
+      CAPTURE(count, ordered);
       decimal_type input{256, 15, 2}, output{256, 37, 2};
       plan_case plan(input, output, "mo_decimal_sum", true);
       auto root                              = plan.plan.mutable_relations(0)->mutable_root();

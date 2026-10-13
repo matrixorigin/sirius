@@ -1006,10 +1006,7 @@ void gpu_pipeline_task::execute(::cuda::stream_ref stream)
   }
 }
 
-void gpu_pipeline_task::synchronize_task_stream(::cuda::stream_ref stream)
-{
-  stream.sync();
-}
+void gpu_pipeline_task::synchronize_task_stream(::cuda::stream_ref stream) { stream.sync(); }
 
 void gpu_pipeline_task::quarantine_failed_task_owners(
   std::unique_ptr<op::operator_data> input,

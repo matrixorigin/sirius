@@ -167,6 +167,7 @@ std::unique_ptr<operator_data> sirius_physical_grouped_aggregate::execute(
         *space,
         stream,
         batch_telemetry()));
+      continue;
     } else if (has_grouping_sets()) {
       results.push_back(
         gpu_aggregate_impl::local_grouping_sets_aggregate(input_batch,

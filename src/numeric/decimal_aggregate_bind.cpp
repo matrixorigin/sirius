@@ -71,8 +71,11 @@ struct aggregate_data final : duckdb::FunctionData {
 {
   throw duckdb::NotImplementedException("MO exact-decimal aggregate cannot execute in DuckDB");
 }
-duckdb::idx_t state_size(duckdb::AggregateFunction const&) { return 1; }
-void initialize(duckdb::AggregateFunction const&, duckdb::data_ptr_t) { never_execute(); }
+duckdb::idx_t state_size(duckdb::AggregateStateInput&) { return 1; }
+void initialize(duckdb::AggregateStateInput&, duckdb::data_ptr_t*, duckdb::idx_t)
+{
+  never_execute();
+}
 void update(
   duckdb::Vector[], duckdb::AggregateInputData&, duckdb::idx_t, duckdb::Vector&, duckdb::idx_t)
 {
@@ -87,48 +90,53 @@ void combine(duckdb::Vector&, duckdb::Vector&, duckdb::AggregateInputData&, duck
 {
   never_execute();
 }
-void finalize(
-  duckdb::Vector&, duckdb::AggregateInputData&, duckdb::Vector&, duckdb::idx_t, duckdb::idx_t)
+void finalize(duckdb::Vector&,
+              duckdb::AggregateFinalizeInputData&,
+              duckdb::Vector&,
+              duckdb::idx_t,
+              duckdb::idx_t)
 {
   never_execute();
 }
-duckdb::unique_ptr<duckdb::FunctionData> bind(
-  duckdb::ClientContext&,
-  duckdb::AggregateFunction& fn,
-  duckdb::vector<duckdb::unique_ptr<duckdb::Expression>>& arguments)
+duckdb::unique_ptr<duckdb::FunctionData> bind(duckdb::BindAggregateFunctionInput& input)
 {
-  auto id = from_duckdb_aggregate_name(fn.name);
+  auto& fn        = input.GetBoundFunction();
+  auto& arguments = input.GetArguments();
+  for (auto& argument : arguments)
+    fold_exact_import_constants(input.GetClientContext(), argument);
+  auto id = from_duckdb_aggregate_name(fn.GetName().GetIdentifierName());
   if (!id || !is_decimal_aggregate(*id) || arguments.size() != 2 ||
       arguments.back()->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT)
     throw duckdb::InvalidInputException("invalid MO aggregate binding marker");
-  auto const& marker = arguments.back()->Cast<duckdb::BoundConstantExpression>().value;
+  auto const& marker = arguments.back()->Cast<duckdb::BoundConstantExpression>().GetValue();
   auto output        = from_duckdb_type(marker.type());
   if (!marker.IsNull() || !output)
     throw duckdb::InvalidInputException("MO aggregate lost its output marker");
   restore_exact_bound_types(arguments[0]);
   validate_aggregate_signature(
-    aggregate_operation(*id), sirius::from_duckdb(arguments[0]->return_type), *output);
-  fn.return_type = marker.type();
+    aggregate_operation(*id), sirius::from_duckdb(arguments[0]->GetReturnType()), *output);
+  fn.SetReturnType(marker.type());
   arguments.pop_back();
-  fn.arguments = {arguments[0]->return_type};
+  fn.GetArguments() = {arguments[0]->GetReturnType()};
   return duckdb::make_uniq<aggregate_data>(
-    aggregate_operation(*id), fn.arguments[0], fn.return_type);
+    aggregate_operation(*id), fn.GetArguments()[0], fn.GetReturnType());
 }
 duckdb::AggregateFunction make_function(aggregate_op op)
 {
-  duckdb::AggregateFunction fn(std::string(to_duckdb_aggregate_name(aggregate_function(op))),
-                               {duckdb::LogicalType::ANY, duckdb::LogicalType::ANY},
-                               duckdb::LogicalType::ANY,
-                               state_size,
-                               initialize,
-                               update,
-                               combine,
-                               finalize,
-                               duckdb::FunctionNullHandling::SPECIAL_HANDLING,
-                               simple_update,
-                               bind);
-  fn.stability       = duckdb::FunctionStability::VOLATILE;
-  fn.order_dependent = duckdb::AggregateOrderDependent::NOT_ORDER_DEPENDENT;
+  duckdb::AggregateFunction fn(
+    duckdb::Identifier(std::string(to_duckdb_aggregate_name(aggregate_function(op)))),
+    {duckdb::LogicalType::ANY, duckdb::LogicalType::ANY},
+    duckdb::LogicalType::ANY,
+    state_size,
+    initialize,
+    update,
+    combine,
+    finalize,
+    duckdb::FunctionNullHandling::SPECIAL_HANDLING,
+    nullptr,
+    bind);
+  fn.SetStability(duckdb::FunctionStability::VOLATILE);
+  fn.SetOrderDependent(duckdb::AggregateOrderDependent::NOT_ORDER_DEPENDENT);
   return fn;
 }
 }  // namespace
@@ -143,12 +151,14 @@ void register_aggregate_functions(duckdb::DatabaseInstance& instance)
 }
 void validate_bound_aggregate(duckdb::BoundAggregateExpression const& expression)
 {
-  auto data = dynamic_cast<aggregate_data const*>(expression.bind_info.get());
-  auto id   = from_duckdb_aggregate_name(expression.function.name);
+  auto data = dynamic_cast<aggregate_data const*>(expression.BindInfo().get());
+  auto id   = from_duckdb_aggregate_name(expression.Function().GetName().GetIdentifierName());
   if (!data || !id || !is_decimal_aggregate(*id) || data->op != aggregate_operation(*id) ||
-      expression.children.size() != 1 || data->input != expression.children[0]->return_type ||
-      data->output != expression.return_type || expression.function.bind != bind ||
-      expression.IsDistinct() || expression.filter || expression.order_bys)
+      expression.GetChildren().size() != 1 ||
+      data->input != expression.GetChildren()[0]->GetReturnType() ||
+      data->output != expression.GetReturnType() ||
+      expression.Function().GetBindCallback() != bind || expression.IsDistinct() ||
+      expression.GetFilter() || expression.GetOrderBys())
     throw std::invalid_argument(
       "MO aggregate lost its checked signature or has unsupported modifiers");
   validate_aggregate_signature(
@@ -160,13 +170,14 @@ duckdb::unique_ptr<duckdb::Expression> bound_aggregate(
   logical_type const& output)
 {
   if (children.size() != 1) throw std::invalid_argument("MO aggregate needs one operand");
-  validate_aggregate_signature(op, sirius::from_duckdb(children[0]->return_type), output);
-  auto fn        = make_function(op);
-  fn.arguments   = {children[0]->return_type};
-  fn.return_type = duckdb_type(output);
-  auto result    = duckdb::make_uniq<duckdb::BoundAggregateExpression>(
+  validate_aggregate_signature(op, sirius::from_duckdb(children[0]->GetReturnType()), output);
+  duckdb::BoundAggregateFunction fn(make_function(op));
+  fn.GetArguments() = {children[0]->GetReturnType()};
+  fn.SetReturnType(duckdb_type(output));
+  auto result = duckdb::make_uniq<duckdb::BoundAggregateExpression>(
     fn, std::move(children), nullptr, nullptr, duckdb::AggregateType::NON_DISTINCT);
-  result->bind_info = duckdb::make_uniq<aggregate_data>(op, fn.arguments[0], fn.return_type);
+  result->BindInfoMutable() =
+    duckdb::make_uniq<aggregate_data>(op, fn.GetArguments()[0], fn.GetReturnType());
   return result;
 }
 }  // namespace sirius::mo_decimal

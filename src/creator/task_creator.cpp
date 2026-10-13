@@ -271,7 +271,8 @@ task_creator::compute_pipeline_priorities(const sirius::planner::query& query) c
 void task_creator::discard_pending_tasks(sirius::query_id_t query_id)
 {
   if (auto state = get_query_task_global_state(query_id))
-    for (auto const& [node, wake] : state->live_wakes) wake->close();
+    for (auto const& [node, wake] : state->live_wakes)
+      wake->close();
   // Queue disposal is not a lifetime barrier. The owner has settled publication and will
   // wait for leases, including requests already held by the manager or a worker.
   _task_creation_queue.drain(
@@ -715,7 +716,10 @@ void task_creator::manager_loop()
          query_state = std::move(query_state)]() mutable {
           struct wake_guard {
             std::shared_ptr<embedding::source_wakeup> wake;
-            ~wake_guard() { if (wake) wake->complete(); }
+            ~wake_guard()
+            {
+              if (wake) wake->complete();
+            }
           } wake_done{std::move(request->live_wake)};
           // Scoped marker so task_creator::stop() can assert it is never called from here.
           struct worker_marker {
@@ -733,7 +737,7 @@ void task_creator::manager_loop()
             }
 
             while (!node->all_ports_empty()) {
-              auto task_lock  = pipeline->get_task_creation_lock();
+              auto task_lock = pipeline->get_task_creation_lock();
               std::shared_ptr<embedding::terminal_ticket> terminal_ticket;
               if (auto sink = pipeline->get_sink()) {
                 if (auto admission = sink->terminal_admission_control()) {
@@ -954,13 +958,13 @@ void task_creator::arm_live_inputs(const planner::query& query)
         if (!generation) return;
         auto submission = begin_submission(id);
         if (!submission) return;
-        auto request       = std::make_unique<task_creation_request>();
-        request->node      = node;
-        request->query_id  = id;
-        request->priority  = priority;
-        request->live_wake = generation->live_wakes.at(node);
+        auto request           = std::make_unique<task_creation_request>();
+        request->node          = node;
+        request->query_id      = id;
+        request->priority      = priority;
+        request->live_wake     = generation->live_wakes.at(node);
         request->operator_type = node->type;
-        request->work = submission.take_work_lease();
+        request->work          = submission.take_work_lease();
         if (!_task_creation_queue.push(std::move(request)))
           throw std::runtime_error("live input scheduling queue is stopped");
       },

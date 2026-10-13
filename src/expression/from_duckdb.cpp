@@ -16,9 +16,10 @@
 
 #include "expression/ast/from_duckdb.hpp"
 
-#include <duckdb/planner/filter/expression_filter.hpp>
 #include "numeric/decimal_aggregate_bind.hpp"
 #include "numeric/decimal_functions.hpp"
+
+#include <duckdb/planner/filter/expression_filter.hpp>
 
 // sirius
 #include "expression/aggregate_id.hpp"
@@ -134,7 +135,7 @@ std::unique_ptr<node> translate_comparison(duckdb::BoundFunctionExpression const
       default: break;
     }
     if (op) {
-      auto result = sirius::from_duckdb(expr.return_type);
+      auto result = sirius::from_duckdb(expr.GetReturnType());
       // Join construction/cloning introduces ordinary comparison nodes, whose
       // Boolean type has no nullability carrier. Their strictness follows the
       // already validated exact key descriptors. Public scalar markers retain

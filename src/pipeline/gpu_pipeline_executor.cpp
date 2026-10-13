@@ -21,8 +21,8 @@
 #include "cuda/device_health.hpp"
 #include "cuda_runtime_api.h"
 #include "downgrade/downgrade_executor.hpp"
-#include "exec/leased_callable.hpp"
 #include "embedding/control.hpp"
+#include "exec/leased_callable.hpp"
 #include "log/logging.hpp"
 #include "op/scan/table_scan/scan_contract.hpp"
 #include "op/sirius_physical_operator.hpp"
@@ -298,31 +298,31 @@ void gpu_pipeline_executor::process_task(
       // Full converter admission is mandatory. Downstream estimates remain advisory.
       bytes_needs = reservation->size();
     } else {
-    // Try without blocking first, purely so the blocking case can be reported.
-    // make_reservation() parks until the memory frees up, and a listener told
-    // only once it returns learns nothing it can act on -- by then the stall it
-    // would have exploited is over.  A reservation that succeeds outright is the
-    // common case and raises nothing.
-    reservation = _memory_space->make_reservation_or_null(bytes_needs);
-    if (!reservation || reservation->size() < bytes_needs) {
-      memory_wait_activity =
-        _query_lifecycle.begin_memory_wait(pipe ? pipe->get_query_id() : make_query_id(0));
-    }
-    if (!reservation) {
-      if (_query_event_publisher) {
-        auto const* pipe               = gpu_task->get_pipeline();
-        auto const stalled_operator_id = pipe != nullptr
-                                           ? pipe->get_source_operator().first
-                                           : op::sirius_physical_operator::invalid_operator_id;
-        _query_event_publisher->publish_wait_for_memory_for_task(
-          make_query_id(
-            static_cast<std::uint32_t>(static_cast<std::uint64_t>(gpu_task->get_priority()) >> 32)),
-          stalled_operator_id,
-          _memory_space != nullptr ? _memory_space->get_device_id() : -1,
-          bytes_needs);
+      // Try without blocking first, purely so the blocking case can be reported.
+      // make_reservation() parks until the memory frees up, and a listener told
+      // only once it returns learns nothing it can act on -- by then the stall it
+      // would have exploited is over.  A reservation that succeeds outright is the
+      // common case and raises nothing.
+      reservation = _memory_space->make_reservation_or_null(bytes_needs);
+      if (!reservation || reservation->size() < bytes_needs) {
+        memory_wait_activity =
+          _query_lifecycle.begin_memory_wait(pipe ? pipe->get_query_id() : make_query_id(0));
       }
-      reservation = _memory_space->make_reservation(bytes_needs);
-    }
+      if (!reservation) {
+        if (_query_event_publisher) {
+          auto const* pipe               = gpu_task->get_pipeline();
+          auto const stalled_operator_id = pipe != nullptr
+                                             ? pipe->get_source_operator().first
+                                             : op::sirius_physical_operator::invalid_operator_id;
+          _query_event_publisher->publish_wait_for_memory_for_task(
+            make_query_id(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(gpu_task->get_priority()) >> 32)),
+            stalled_operator_id,
+            _memory_space != nullptr ? _memory_space->get_device_id() : -1,
+            bytes_needs);
+        }
+        reservation = _memory_space->make_reservation(bytes_needs);
+      }
     }
     if (!reservation) {
       SIRIUS_LOG_ERROR("GPU Pipeline Executor: Failed to acquire memory reservation for task {}",
