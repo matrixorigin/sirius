@@ -14,7 +14,9 @@
 
 #include <catch.hpp>
 
+#include <algorithm>
 #include <array>
+#include <limits>
 
 using namespace sirius;
 using namespace sirius::mo_decimal;
@@ -63,16 +65,16 @@ void expect(cudf::column_view column,
   for (int i = 0; i < 8; ++i)
     CHECK(observed.words[i] == expected.words[i]);
 }
-std::shared_ptr<aggregate_layout const> layout(aggregate_op op,
-                                               logical_type input,
-                                               logical_type output,
-                                               bool grouped = false,
-                                               bool count   = false)
+std::shared_ptr<aggregate_layout const> layout(
+  aggregate_op op,
+  logical_type input,
+  logical_type output,
+  bool grouped            = false,
+  bool count              = false,
+  logical_type group_type = logical_type::make(type_id::INTEGER))
 {
   duckdb::vector<std::unique_ptr<ast::node>> groups, aggregates;
-  if (grouped)
-    groups.push_back(
-      std::make_unique<ast::node>(ast::reference{1, logical_type::make(type_id::INTEGER)}));
+  if (grouped) groups.push_back(std::make_unique<ast::node>(ast::reference{1, group_type}));
   std::vector<std::unique_ptr<ast::node>> args;
   args.push_back(std::make_unique<ast::node>(ast::reference{0, input}));
   aggregates.push_back(std::make_unique<ast::node>(
@@ -124,6 +126,140 @@ TEST_CASE("MO GPU aggregate local and merge retain all widths and ordinary slots
              stream);
     }
 }
+TEST_CASE("Decimal64 grouped sums retain physical bounds and mixed slot identities",
+          "[decimal_aggregate_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto mr = cudf::get_current_device_resource_ref();
+  decimal_type input{64, 18, 0};
+  auto values = make_decimal_column(input, 6, cudf::mask_state::ALL_VALID, stream, mr);
+  auto keys   = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::INT32}, 6, cudf::mask_state::ALL_VALID, stream, mr);
+  std::array<int64_t, 6> raw{
+    std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), 3, -3, 9, 9};
+  std::array<int32_t, 6> groups{1, 1, 2, 2, 3, 3};
+  cudf::bitmask_type mask = 0x0f;
+  REQUIRE(cudaMemcpyAsync(values->mutable_view().data<uint8_t>(),
+                          raw.data(),
+                          sizeof(raw),
+                          cudaMemcpyHostToDevice,
+                          stream.value()) == cudaSuccess);
+  REQUIRE(cudaMemcpyAsync(keys->mutable_view().data<int32_t>(),
+                          groups.data(),
+                          sizeof(groups),
+                          cudaMemcpyHostToDevice,
+                          stream.value()) == cudaSuccess);
+  for (auto* column : {values.get(), keys.get()}) {
+    REQUIRE(cudaMemcpyAsync(column->mutable_view().null_mask(),
+                            &mask,
+                            sizeof(mask),
+                            cudaMemcpyHostToDevice,
+                            stream.value()) == cudaSuccess);
+    column->set_null_count(2);
+  }
+  stream.synchronize();
+  auto wider =
+    cudf::cast(values->view(), cudf::data_type{cudf::type_id::DECIMAL128, 0}, stream, mr);
+  auto definition = [&](decimal_type operand, uint16_t bits) {
+    duckdb::vector<std::unique_ptr<ast::node>> grouped, aggregates;
+    auto source = logical_type::make_mo_decimal(operand, true);
+    grouped.push_back(
+      std::make_unique<ast::node>(ast::reference{1, logical_type::make(type_id::INTEGER)}));
+    for (auto op : {aggregate_op::sum, aggregate_op::avg}) {
+      std::vector<std::unique_ptr<ast::node>> args;
+      args.push_back(std::make_unique<ast::node>(ast::reference{0, source}));
+      aggregates.push_back(std::make_unique<ast::node>(ast::aggregate{
+        aggregate_function(op),
+        std::move(args),
+        logical_type::make_mo_decimal({bits,
+                                       static_cast<uint8_t>(op == aggregate_op::sum ? 37 : 19),
+                                       static_cast<uint8_t>(op == aggregate_op::sum ? 0 : 4)},
+                                      true),
+        false}));
+    }
+    std::vector<std::unique_ptr<ast::node>> args;
+    args.push_back(std::make_unique<ast::node>(ast::reference{0, source}));
+    aggregates.push_back(std::make_unique<ast::node>(ast::aggregate{
+      aggregate_id::count, std::move(args), logical_type::make(type_id::BIGINT), false}));
+    aggregates.push_back(std::make_unique<ast::node>(
+      ast::aggregate{aggregate_id::count_star, {}, logical_type::make(type_id::BIGINT), false}));
+    return make_aggregate_layout(grouped, aggregates);
+  };
+  for (uint16_t bits : {128, 256}) {
+    auto fast_layout      = definition(input, bits);
+    auto reference_layout = definition({128, 38, 0}, bits);
+    auto partial          = local_aggregate_table(
+      cudf::table_view{{values->view(), keys->view()}}, *fast_layout, stream, mr);
+    auto reference = local_aggregate_table(
+      cudf::table_view{{wider->view(), keys->view()}}, *reference_layout, stream, mr);
+    REQUIRE(partial->num_rows() == 3);
+    REQUIRE(partial->num_columns() == 7);
+    CHECK(partial->view().column(0).null_count() == 1);
+    for (int column = 1; column < 7; ++column) {
+      auto bytes = column == 1 || column == 3 ? bits / 8 : 8;
+      CHECK(partial->view().column(column).null_count() == 0);
+      for (int row = 0; row < 3; ++row) {
+        auto a =
+          read(cudf::slice(partial->view().column(column), {row, row + 1})[0], bytes, stream);
+        auto b =
+          read(cudf::slice(reference->view().column(column), {row, row + 1})[0], bytes, stream);
+        CHECK(std::equal(std::begin(a.words), std::end(a.words), std::begin(b.words)));
+        auto expected             = column == 1 || column == 3 ? (row == 0 ? -1 : 0)
+                                    : column == 6              ? 2
+                                                               : (row == 2 ? 0 : 2);
+        auto expected_coefficient = small(expected);
+        CHECK(std::equal(
+          std::begin(a.words), std::end(a.words), std::begin(expected_coefficient.words)));
+      }
+    }
+    auto result =
+      merge_aggregate_tables({partial->view(), partial->view()}, *fast_layout, stream, mr);
+    REQUIRE(result->num_rows() == 3);
+    CHECK(result->view().column(1).null_count() == 1);
+    CHECK(result->view().column(2).null_count() == 1);
+    auto sum          = read(cudf::slice(result->view().column(1), {0, 1})[0], bits / 8, stream);
+    auto avg          = read(cudf::slice(result->view().column(2), {0, 1})[0], bits / 8, stream);
+    auto expected_sum = small(-2), expected_avg = small(-5000);
+    CHECK(std::equal(std::begin(sum.words), std::end(sum.words), std::begin(expected_sum.words)));
+    CHECK(std::equal(std::begin(avg.words), std::end(avg.words), std::begin(expected_avg.words)));
+  }
+}
+
+TEST_CASE("Decimal64 grouped string keys preserve empty and all-NULL results",
+          "[decimal_aggregate_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto mr = cudf::get_current_device_resource_ref();
+  decimal_type input{64, 15, 2}, output{256, 37, 2};
+  for (int rows : {0, 3}) {
+    for (bool valid : {false, true}) {
+      auto values = make_decimal_literal(input, small(125), valid, rows, stream, mr);
+      auto keys   = test::operator_utils::make_string_column(
+        rows ? std::vector<std::string>{"b", "a", "b"} : std::vector<std::string>{}, stream, mr);
+      auto definition = layout(aggregate_op::sum,
+                               logical_type::make_mo_decimal(input, true),
+                               logical_type::make_mo_decimal(output, true),
+                               true,
+                               true,
+                               logical_type::make(type_id::VARCHAR));
+      auto partial    = local_aggregate_table(
+        cudf::table_view{{values->view(), keys->view()}}, *definition, stream, mr);
+      auto result =
+        merge_aggregate_tables({partial->view(), partial->view()}, *definition, stream, mr);
+      REQUIRE(result->num_rows() == (rows ? 2 : 0));
+      CHECK(result->view().column(1).null_count() == (rows && !valid ? 2 : 0));
+      if (rows) {
+        auto count = read(cudf::slice(result->view().column(2), {0, 1})[0], 8, stream);
+        CHECK(count.words[0] == 2);
+        if (valid) {
+          auto sum = read(cudf::slice(result->view().column(1), {0, 1})[0], 32, stream);
+          CHECK(sum.words[0] == 250);
+        }
+      }
+    }
+  }
+}
+
 TEST_CASE("MO GPU grouped states preserve common ordinals and NULL identities",
           "[decimal_aggregate_gpu]")
 {
@@ -288,6 +424,95 @@ TEST_CASE("MO Decimal256 validity restoration retains outer gather NULLs",
   CHECK(column_error(result, stream, mr) == decimal_error::none);
   CHECK(result.values->null_count() == 1);
 }
+TEST_CASE("Decimal64 local sums preserve checked final precision and recovery",
+          "[decimal_aggregate_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto mr     = cudf::get_current_device_resource_ref();
+  auto values = make_decimal_literal({64, 18, 0}, small(900000000000000000LL), true, 2, stream, mr);
+  auto keys   = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::INT32}, 2, cudf::mask_state::UNALLOCATED, stream, mr);
+  REQUIRE(cudaMemsetAsync(keys->mutable_view().data<int32_t>(), 0, 8, stream.value()) ==
+          cudaSuccess);
+  stream.synchronize();
+  auto definition = layout(aggregate_op::sum,
+                           logical_type::make_mo_decimal({64, 18, 0}, true),
+                           logical_type::make_mo_decimal({128, 18, 0}, true),
+                           true);
+  auto partial    = local_aggregate_table(
+    cudf::table_view{{values->view(), keys->view()}}, *definition, stream, mr);
+  REQUIRE(partial->num_rows() == 1);
+  try {
+    merge_aggregate_tables({partial->view()}, *definition, stream, mr);
+    FAIL("final Decimal64 SUM precision overflow was ignored");
+  } catch (numeric_error const& error) {
+    CHECK(error.code() == decimal_error::invalid_input);
+  }
+  auto one_value = cudf::slice(values->view(), {0, 1})[0];
+  auto one_key   = cudf::slice(keys->view(), {0, 1})[0];
+  auto healthy =
+    local_aggregate_table(cudf::table_view{{one_value, one_key}}, *definition, stream, mr);
+  auto result = merge_aggregate_tables({healthy->view()}, *definition, stream, mr);
+  expect(result->view().column(1), {128, 18, 0}, 900000000000000000LL, stream);
+}
+
+TEST_CASE("Decimal64 grouped allocation cutpoints release temporary owners",
+          "[decimal_aggregate_gpu]")
+{
+  rmm::cuda_stream stream;
+  auto upstream = cudf::get_current_device_resource_ref();
+  auto values   = make_decimal_literal({64, 15, 2}, small(125), true, 3, stream, upstream);
+  auto keys     = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::INT32}, 3, cudf::mask_state::UNALLOCATED, stream, upstream);
+  int32_t groups[]{1, 1, 2};
+  REQUIRE(cudaMemcpyAsync(keys->mutable_view().data<int32_t>(),
+                          groups,
+                          sizeof(groups),
+                          cudaMemcpyHostToDevice,
+                          stream.value()) == cudaSuccess);
+  stream.synchronize();
+  auto definition = layout(aggregate_op::sum,
+                           logical_type::make_mo_decimal({64, 15, 2}, true),
+                           logical_type::make_mo_decimal({256, 37, 2}, true),
+                           true,
+                           true);
+  int failures = 0, successes = 0;
+  for (int cutpoint = 0; cutpoint < 64; ++cutpoint) {
+    size_t live   = 0;
+    int remaining = cutpoint;
+    bool bad_free = false;
+    rmm::mr::callback_memory_resource resource(
+      [&](size_t bytes, rmm::cuda_stream_view stream, void*) {
+        if (!remaining--) throw std::bad_alloc();
+        auto p = upstream.allocate(stream, bytes, 256);
+        live += bytes;
+        return p;
+      },
+      [&](void* p, size_t bytes, rmm::cuda_stream_view stream, void*) {
+        if (bytes > live)
+          bad_free = true;
+        else
+          live -= bytes;
+        upstream.deallocate(stream, p, bytes, 256);
+      });
+    auto mr = rmm::to_device_async_resource_ref_checked(&resource);
+    try {
+      auto result = local_aggregate_table(
+        cudf::table_view{{values->view(), keys->view()}}, *definition, stream, mr);
+      REQUIRE(result->num_rows() == 2);
+      REQUIRE(result->num_columns() == 4);
+      ++successes;
+    } catch (std::bad_alloc const&) {
+      ++failures;
+    }
+    stream.synchronize();
+    CHECK(live == 0);
+    CHECK_FALSE(bad_free);
+  }
+  CHECK(failures > 0);
+  CHECK(successes > 0);
+}
+
 TEST_CASE("MO aggregate allocation cutpoints retire submitted buffers", "[decimal_aggregate_gpu]")
 {
   rmm::cuda_stream stream;
