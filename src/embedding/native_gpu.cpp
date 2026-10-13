@@ -13,12 +13,7 @@ namespace {
 using host_resource = cucascade::memory::fixed_size_host_memory_resource;
 struct pool_storage final : input_storage {
   host_resource::fixed_multiple_blocks_allocation blocks;
-  explicit pool_storage(host_resource::fixed_multiple_blocks_allocation p) : blocks(std::move(p))
-  {
-    // Never expose bytes from a previous query when a caller leaves a field unwritten.
-    for (auto* block : blocks->get_blocks())
-      std::memset(block, 0, blocks->block_size());
-  }
+  explicit pool_storage(host_resource::fixed_multiple_blocks_allocation p) : blocks(std::move(p)) {}
   std::size_t size() const override { return blocks->size_bytes(); }
   void read(std::size_t offset, std::span<std::byte> bytes) const override
   {

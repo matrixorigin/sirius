@@ -67,7 +67,10 @@ sirius_status native_result::try_allocate(std::size_t bytes,
   if (batch->stats) batch->stats->result_retain(charge);
   batch->credit = std::move(credit);
   batch->pool   = pool;
-  if (bytes) batch->storage = pool->allocate(bytes);
+  if (bytes) {
+    batch->storage = pool->allocate(bytes);
+    batch->storage->initialize(bytes);
+  }
   batch->columns       = std::make_unique<sirius_input_vector[]>(columns);
   batch->column_count  = columns;
   batch->payload_bytes = bytes;

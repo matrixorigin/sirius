@@ -6,6 +6,30 @@ The semantic authority remains MO #29449 document blob
 `42a89f09a1d168d02b9583cb3ea7b4de6dbb5634`; MO #29690 records the B-F
 delivery sequence. The detailed implementation plan was approved before code.
 
+## Approved input initialization optimization (2026-10-13)
+
+The MO owner approved a focused performance increment before implementation.
+Native input acquisition initializes exactly the admitted logical payload,
+after allocating and validating its physical storage and before returning the
+lease. Unwritten payload bytes remain zero. Rounded allocator padding stays
+unaddressable by the input descriptor and is never uploaded; all physical blocks
+and descriptors remain charged to the existing input window.
+
+Initialization belongs to the common acquisition owner, including CPU fixtures,
+rather than the GPU pool constructor. No input credit, coalescing, ABI, worker or
+allocator change is needed. A poisoned multi-block fixture proves cross-block
+zeroing, untouched padding and partial-failure credit release; real GPU input,
+cancellation/reuse and memory checks close the production consumer. The negation
+is exposure of stale logical bytes, initialization of unused padding, or retained
+credit after an allocation/initialization failure.
+
+The pinned pool also backs results and publisher scratch. Result acquisition
+uses the same logical-range initializer so alignment gaps and unwritten result
+bytes preserve the previous zero guarantee. CPU/poisoned result fixtures and
+real result packing close this reverse consumer; allocator padding remains
+charged and unaddressable. The initializer is a nonvirtual internal storage
+helper and changes no C ABI or storage ownership.
+
 ## Contracts and owners
 
 The validated import descriptor owns width, precision, scale and nullability.

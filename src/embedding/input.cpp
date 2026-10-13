@@ -26,6 +26,13 @@ T load(input_storage const& data, std::size_t offset)
   return value;
 }
 }  // namespace
+void input_storage::initialize(std::size_t bytes)
+{
+  range(0, bytes, size());
+  visit([bytes](std::size_t offset, std::span<std::byte> block) {
+    if (offset < bytes) std::memset(block.data(), 0, std::min(block.size(), bytes - offset));
+  });
+}
 void input_storage::write(std::size_t offset, std::span<const std::byte> bytes)
 {
   range(offset, bytes.size(), size());
@@ -230,6 +237,10 @@ std::shared_ptr<input_batch> native_input::acquire(std::size_t bytes, clock::tim
   batch->storage       = pool->allocate(allocated);
   batch->payload_bytes = bytes;
   require(batch->storage && batch->storage->size() == allocated, "invalid native pool allocation");
+  // Initialize every addressable byte, including fields a caller leaves
+  // unwritten. Physical pool padding stays charged but is never exposed or
+  // uploaded, so clearing it would amplify work for selective reader batches.
+  batch->storage->initialize(bytes);
   {
     std::lock_guard lock(mutex_);
     check_open();
