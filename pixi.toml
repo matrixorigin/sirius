@@ -110,18 +110,25 @@ VCPKG_CUDA_VERSION = "12"
 # Optional MatrixOne embedding profile. The ordinary Sirius profiles retain
 # their existing toolkit selection; MO and Sirius share this locked provider.
 [feature.mo]
-platforms = ["linux-64-cuda13"]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.mo.dependencies]
 cuda-version = "13.3.*"
 libcudf = "==26.08.01"
 libcuvs = "==26.08.01"
 librmm = "26.08.*"
-gcc_linux-64 = "14.*"
-gxx_linux-64 = "14.*"
 patchelf = "*"
 
+[feature.mo.target.linux-64.dependencies]
+gcc_linux-64 = "14.*"
+gxx_linux-64 = "14.*"
+
+[feature.mo.target.linux-aarch64.dependencies]
+gcc_linux-aarch64 = "14.*"
+gxx_linux-aarch64 = "14.*"
+
 [feature.mo.activation.env]
+CMAKE_GENERATOR = "Ninja"
 CUDAARCHS = "75-real;80-real;86-real;89-real;90a-real;100f-real;120a-real;120"
 VCPKG_CUDA_VERSION = "13"
 
