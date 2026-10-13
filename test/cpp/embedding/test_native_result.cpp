@@ -11,7 +11,7 @@ using namespace std::chrono_literals;
 namespace {
 struct result_test_storage final : input_storage {
   std::vector<std::byte> data;
-  explicit result_test_storage(std::size_t n) : data(n) {}
+  explicit result_test_storage(std::size_t n) : data(n, std::byte{0xa5}) {}
   std::size_t size() const override { return data.size(); }
   void visit(std::function<void(std::size_t, std::span<std::byte>)> const& fn) override
   {
@@ -33,6 +33,21 @@ struct result_fixture {
   ~result_fixture() { result->cancel(); }
 };
 }  // namespace
+TEST_CASE("native results initialize logical gaps without clearing allocation padding",
+          "[native_result]")
+{
+  result_fixture f;
+  std::shared_ptr<result_batch> batch;
+  REQUIRE(f.result->try_allocate(43, 0, batch) == SIRIUS_OK);
+  REQUIRE(batch->payload_bytes == 43);
+  std::array<std::byte, 48> bytes{};
+  batch->storage->read(0, bytes);
+  for (std::size_t i = 0; i < bytes.size(); ++i)
+    CHECK(bytes[i] == (i < batch->payload_bytes ? std::byte{0} : std::byte{0xa5}));
+  batch.reset();
+  CHECK(f.result->inspect().retained_bytes == 0);
+  CHECK(f.result->inspect().filling_batches == 0);
+}
 TEST_CASE("native result credit spans filling queued borrowed and cancellation", "[native_result]")
 {
   result_fixture f;
