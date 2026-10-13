@@ -20,6 +20,7 @@ struct input_storage {
   virtual std::size_t size() const                                                  = 0;
   virtual void visit(std::function<void(std::size_t, std::span<std::byte>)> const&) = 0;
   void write(std::size_t offset, std::span<const std::byte> bytes);
+  void initialize(std::size_t bytes);
   virtual void read(std::size_t offset, std::span<std::byte> bytes) const;
 };
 struct input_pool {

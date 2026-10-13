@@ -74,6 +74,34 @@ struct rounded_pool : heap_pool {
     return (bytes + block - 1) / block * block;
   }
 };
+struct poisoned_storage : input_storage {
+  std::shared_ptr<std::vector<std::byte>> data;
+  std::size_t block;
+  bool fail;
+  poisoned_storage(std::shared_ptr<std::vector<std::byte>> bytes, std::size_t size, bool failure)
+    : data(std::move(bytes)), block(size), fail(failure)
+  {
+  }
+  std::size_t size() const override { return data->size(); }
+  void visit(std::function<void(std::size_t, std::span<std::byte>)> const& fn) override
+  {
+    for (std::size_t offset = 0; offset < data->size(); offset += block) {
+      if (fail && offset) throw std::bad_alloc();
+      fn(offset, std::span{*data}.subspan(offset, block));
+    }
+  }
+};
+struct poisoned_pool : rounded_pool {
+  std::weak_ptr<std::vector<std::byte>> last;
+  bool fail{false};
+  poisoned_pool() : rounded_pool(32) {}
+  std::unique_ptr<input_storage> allocate(std::size_t bytes) override
+  {
+    auto data = std::make_shared<std::vector<std::byte>>(bytes, std::byte{0xa5});
+    last      = data;
+    return std::make_unique<poisoned_storage>(std::move(data), block, fail);
+  }
+};
 struct observed_storage : heap_storage {
   std::shared_ptr<std::atomic<int>> reads;
   std::shared_ptr<std::atomic<bool>> fail;
@@ -111,6 +139,35 @@ void publish_ints(input_fixture& f, uint32_t rows, int64_t first = 0)
   f.input->publish(batch, rows, {&column, 1});
 }
 }  // namespace
+TEST_CASE("native input initializes logical bytes without clearing pool padding", "[native_input]")
+{
+  auto pool = std::make_shared<poisoned_pool>();
+  input_fixture f({23, 0, 0, 1}, 64 + column_charge, input_target, 4, pool);
+  auto batch = f.input->acquire(43, clock::now());
+  {
+    auto bytes = pool->last.lock();
+    REQUIRE(bytes);
+    REQUIRE(bytes->size() == 64);
+    for (std::size_t i = 0; i < bytes->size(); ++i)
+      CHECK((*bytes)[i] == (i < 43 ? std::byte{0} : std::byte{0xa5}));
+  }
+  CHECK(f.input->inspect().retained_bytes == 64 + column_charge);
+  std::byte value{1};
+  REQUIRE_THROWS_AS(batch->write(43, {&value, 1}), failure);
+  sirius_input_vector column{};
+  column.data_offset = 40;
+  column.data_bytes  = 8;
+  REQUIRE_THROWS_AS(f.input->publish(batch, 1, {&column, 1}), failure);
+  batch.reset();
+  CHECK(pool->last.expired());
+  CHECK(f.input->inspect().retained_bytes == 0);
+
+  pool->fail = true;
+  REQUIRE_THROWS_AS(f.input->acquire(43, clock::now()), std::bad_alloc);
+  CHECK(pool->last.expired());
+  CHECK(f.input->inspect().retained_bytes == 0);
+  CHECK(f.input->inspect().filling_batches == 0);
+}
 TEST_CASE("native input credits follow filling queued and retry owners", "[native_input]")
 {
   input_fixture f({23, 0, 0, 1}, 144, 140);
