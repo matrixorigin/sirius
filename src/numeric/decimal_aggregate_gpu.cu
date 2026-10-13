@@ -192,6 +192,12 @@ __global__ void key_rows(
     scales[row] = key.scale;
   }
 }
+__global__ void copy_state_rows(operand input, destination output, cudf::size_type rows)
+{
+  for (int64_t row = blockIdx.x * blockDim.x + threadIdx.x; row < rows;
+       row += blockDim.x * gridDim.x)
+    output.store(input.value(row), row);
+}
 struct child_validity {
   cudf::bitmask_type const* masks[4]{};
   cudf::size_type offsets[4]{};
@@ -236,6 +242,29 @@ template <class Owner>
   std::rethrow_exception(failure);
 }
 }  // namespace
+std::unique_ptr<cudf::column> promote_aggregate_sum(cudf::column_view sums,
+                                                    uint8_t scale,
+                                                    rmm::cuda_stream_view stream,
+                                                    rmm::device_async_resource_ref mr)
+{
+  decimal_type input{128, 38, scale};
+  if (!decimal_column_matches(sums, input) || !input.valid() || sums.has_nulls())
+    throw std::invalid_argument("invalid raw local sum for Decimal256 promotion");
+  auto owner = std::make_unique<std::unique_ptr<cudf::column>>();
+  try {
+    *owner =
+      make_decimal_column({256, 76, scale}, sums.size(), cudf::mask_state::UNALLOCATED, stream, mr);
+    if (sums.size()) {
+      copy_state_rows<<<128, block_size, 0, stream.value()>>>(
+        view(sums, input), output_view((*owner)->mutable_view(), 32), sums.size());
+      CUDF_CUDA_TRY(cudaGetLastError());
+    }
+    return std::move(*owner);
+  } catch (...) {
+    rethrow_quiescent(owner, stream);
+  }
+}
+
 aggregate_columns reduce_aggregate_columns(aggregate_op op,
                                            cudf::column_view values,
                                            decimal_type input,

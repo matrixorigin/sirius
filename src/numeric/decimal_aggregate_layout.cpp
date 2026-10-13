@@ -14,11 +14,14 @@
 #include <cudf/lists/count_elements.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/reduction.hpp>
+#include <cudf/replace.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/unary.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/traits.hpp>
 
+#include <algorithm>
 #include <numeric>
 #include <optional>
 
@@ -132,6 +135,8 @@ struct owners {
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
   std::vector<std::unique_ptr<cudf::table>> intermediates;
   std::optional<aggregate_columns> pending;
+  std::vector<cudf::groupby::aggregation_request> requests;
+  std::vector<cudf::groupby::aggregation_result> request_results;
   cudf::size_type ungrouped_offsets[2]{};
 };
 template <class Base>
@@ -243,6 +248,147 @@ std::unique_ptr<cudf::table> finish(cudf::table_view input,
     std::rethrow_exception(error);
   }
 }
+bool use_decimal64_groupby(aggregate_layout const& layout)
+{
+  if (layout.group_types.empty()) return false;
+  for (auto const& type : layout.group_types) {
+    if (type.is_integer() && type.fixed_width_byte_size() <= 8) continue;
+    if (type.id() != type_id::BOOLEAN && type.id() != type_id::DATE &&
+        type.id() != type_id::VARCHAR)
+      return false;
+  }
+  bool exact = false;
+  for (auto const& slot : layout.slots) {
+    if (slot.distinct) return false;
+    if (slot.exact()) {
+      auto op = aggregate_operation(slot.id);
+      if ((op != aggregate_op::sum && op != aggregate_op::avg) ||
+          !slot.input_type.is_mo_decimal() || slot.input_type.mo_decimal_type().bits != 64)
+        return false;
+      exact = true;
+    } else if ((slot.id != aggregate_id::count && slot.id != aggregate_id::count_star) ||
+               slot.output_type.id() != type_id::BIGINT ||
+               (slot.id == aggregate_id::count &&
+                (slot.input < 0 || slot.input_type.id() == type_id::STRUCT ||
+                 slot.input_type.id() == type_id::LIST || slot.input_type.id() == type_id::ARRAY ||
+                 (slot.input_type.is_mo_decimal() &&
+                  slot.input_type.mo_decimal_type().bits != 64))))
+      return false;
+  }
+  return exact;
+}
+
+std::unique_ptr<cudf::table> decimal64_groupby(cudf::table_view input,
+                                               aggregate_layout const& layout,
+                                               rmm::cuda_stream_view stream,
+                                               rmm::device_async_resource_ref mr)
+{
+  auto owner = std::make_unique<owners>();
+  try {
+    owner->requests.reserve(layout.slots.size());
+    owner->temporaries.reserve(3 * layout.slots.size());
+    owner->scalars.reserve(layout.slots.size());
+    owner->columns.reserve(layout.group_types.size() + 2 * layout.slots.size());
+    owner->intermediates.reserve(1);
+    std::vector<cudf::column_view> keys;
+    for (int index : layout.group_indices)
+      keys.push_back(input.column(index));
+    owner->grouping =
+      std::make_unique<cudf::groupby::groupby>(cudf::table_view(keys), cudf::null_policy::INCLUDE);
+    std::vector<int> by_input(input.num_columns(), -1);
+    std::vector<std::vector<cudf::aggregation::Kind>> kinds;
+    struct slot_request {
+      std::size_t request, sum, count;
+    };
+    std::vector<slot_request> slots;
+    for (auto const& slot : layout.slots) {
+      auto index = slot.id == aggregate_id::count_star ? layout.group_indices.front() : slot.input;
+      if (index < 0 || index >= input.num_columns())
+        throw std::invalid_argument("local aggregate input outside schema");
+      if (by_input[index] < 0) {
+        by_input[index] = owner->requests.size();
+        owner->requests.push_back({input.column(index), {}});
+        kinds.emplace_back();
+      }
+      auto request = static_cast<std::size_t>(by_input[index]);
+      if (slot.exact()) {
+        auto type = slot.input_type.mo_decimal_type();
+        if (!decimal_column_matches(input.column(index), type))
+          throw std::invalid_argument("invalid Decimal64 local aggregate input");
+        if (owner->requests[request].values.type().id() != cudf::type_id::DECIMAL128) {
+          // Full signed 64-bit coefficients times at most INT32_MAX rows fit
+          // every intermediate signed 128-bit sum, without a precision guess.
+          owner->temporaries.push_back(
+            cudf::cast(input.column(index),
+                       cudf::data_type{cudf::type_id::DECIMAL128, -int32_t(type.scale)},
+                       stream,
+                       mr));
+          owner->requests[request].values = owner->temporaries.back()->view();
+        }
+      }
+      auto ensure = [&](cudf::aggregation::Kind kind) {
+        auto& requested = kinds[request];
+        auto found      = std::find(requested.begin(), requested.end(), kind);
+        if (found != requested.end()) return std::size_t(found - requested.begin());
+        owner->requests[request].aggregations.push_back(
+          aggregation<cudf::groupby_aggregation>(kind));
+        requested.push_back(kind);
+        return requested.size() - 1;
+      };
+      auto count =
+        ensure(slot.id == aggregate_id::count_star ? cudf::aggregation::Kind::COUNT_ALL
+                                                   : cudf::aggregation::Kind::COUNT_VALID);
+      auto sum = slot.exact() ? ensure(cudf::aggregation::Kind::SUM) : 0;
+      slots.push_back({request, sum, count});
+    }
+    auto grouped           = owner->grouping->aggregate(owner->requests, stream, mr);
+    owner->columns         = grouped.first->release();
+    owner->request_results = std::move(grouped.second);
+    owner->columns.reserve(layout.group_types.size() + 2 * layout.slots.size());
+    for (std::size_t i = 0; i < layout.slots.size(); ++i) {
+      auto const& slot    = layout.slots[i];
+      auto binding        = slots[i];
+      auto const& results = owner->request_results[binding.request].results;
+      if (slot.exact()) {
+        auto scale = slot.input_type.mo_decimal_type().scale;
+        owner->scalars.push_back(cudf::make_fixed_point_scalar<numeric::decimal128>(
+          0, numeric::scale_type{-int32_t(scale)}, stream, mr));
+        auto sum =
+          cudf::replace_nulls(results[binding.sum]->view(), *owner->scalars.back(), stream, mr);
+        if (slot.state_bits() == 256) {
+          owner->temporaries.push_back(std::move(sum));
+          sum = promote_aggregate_sum(owner->temporaries.back()->view(), scale, stream, mr);
+        }
+        owner->columns.push_back(std::move(sum));
+      }
+      owner->columns.push_back(cudf::cast(
+        results[binding.count]->view(), cudf::data_type{cudf::type_id::INT64}, stream, mr));
+    }
+    owner->combined = std::make_unique<cudf::table>(std::move(owner->columns));
+    std::vector<cudf::size_type> group_columns(layout.group_types.size());
+    std::iota(group_columns.begin(), group_columns.end(), 0);
+    auto column_order = std::vector<cudf::order>(group_columns.size(), cudf::order::ASCENDING);
+    auto null_order = std::vector<cudf::null_order>(group_columns.size(), cudf::null_order::AFTER);
+    // Keep the current group ordering without sorting all input rows.
+    owner->order = cudf::sorted_order(
+      owner->combined->view().select(group_columns), column_order, null_order, stream, mr);
+    owner->intermediates.push_back(cudf::gather(owner->combined->view(),
+                                                owner->order->view(),
+                                                cudf::out_of_bounds_policy::DONT_CHECK,
+                                                stream,
+                                                mr));
+    CUDF_CUDA_TRY(cudaStreamSynchronize(stream.value()));
+    return std::move(owner->intermediates.back());
+  } catch (...) {
+    auto error = std::current_exception();
+    if (cudaStreamSynchronize(stream.value()) != cudaSuccess) {
+      (void)owner.release();
+      throw pipeline::gpu_stream_quiescence_error("Decimal64 groupby could not prove quiescence");
+    }
+    std::rethrow_exception(error);
+  }
+}
+
 std::unique_ptr<cudf::table> compute(cudf::table_view input,
                                      aggregate_layout const& layout,
                                      bool merging,
@@ -250,6 +396,8 @@ std::unique_ptr<cudf::table> compute(cudf::table_view input,
                                      rmm::device_async_resource_ref mr,
                                      std::unique_ptr<owners> owner = std::make_unique<owners>())
 {
+  if (!merging && use_decimal64_groupby(layout))
+    return decimal64_groupby(input, layout, stream, mr);
   try {
     owner->columns.reserve(layout.group_types.size() + 2 * layout.slots.size());
     owner->temporaries.reserve(4 * layout.slots.size());
