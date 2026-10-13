@@ -36,10 +36,11 @@ struct stats_pool final : input_pool {
 };
 struct charged_pool final : input_pool {
   std::size_t rounded(std::size_t bytes) const override { return bytes; }
-  std::unique_ptr<input_storage> allocate(std::size_t) override
+  std::unique_ptr<input_storage> allocate(std::size_t bytes) override
   {
-    // The handoff test exercises accounting, not a 64 MiB payload.
-    return std::make_unique<stats_storage>(0);
+    // Result acquisition initializes logical bytes before returning the lease.
+    // Even this accounting fixture must back the capacity it advertises.
+    return std::make_unique<stats_storage>(bytes);
   }
 };
 struct callback_waker final : capacity_waker {
