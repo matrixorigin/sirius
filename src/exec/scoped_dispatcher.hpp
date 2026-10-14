@@ -92,7 +92,7 @@ class scoped_dispatcher {
     if (stop_.stop_requested() || inflight_ == max_inflight_) return false;
     ++inflight_;
     lk.unlock();
-    pool_.schedule(std::move(task));
+    submit(std::move(task));
     return true;
   }
 
