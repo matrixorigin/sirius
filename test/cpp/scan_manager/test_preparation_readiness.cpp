@@ -150,6 +150,37 @@ TEST_CASE("Default and zero job limits allow submission while the worker is bloc
   CHECK_FALSE(f.owner_error);
 }
 
+TEST_CASE("A full connector does not block publication or closure of another source",
+          "[scan_preparation][coordinator]")
+{
+  fixture f(2, 8);
+  auto blocked       = std::make_shared<sink>();
+  auto ready         = std::make_shared<sink>();
+  f.source(std::make_shared<accumulator>(1),
+           blocked,
+           finite_jobs(5, [](int id) { return std::make_unique<tagged>(id + 7); }));
+  f.source(std::make_shared<accumulator>(1), ready, finite_jobs(2, [=](int id) {
+             return std::make_unique<tagged>(id);
+           }));
+  auto query_guard = f.shutdown_guard();
+  f.start();
+  REQUIRE(blocked->await(4));
+  REQUIRE(ready->await(2));
+  CHECK(blocked->count() == 4);
+  CHECK(blocked->preparations == 4);
+  ready->consume();
+  ready->consume();
+  REQUIRE(ready->await_closed());
+  CHECK_FALSE(blocked->closed.load());
+  blocked->consume();
+  REQUIRE(blocked->await(5));
+  for (int i = 0; i < 4; ++i) blocked->consume();
+  f.finish();
+  CHECK(blocked->published == std::vector<int>{7, 8, 9, 10, 11});
+  CHECK(ready->published == std::vector<int>{0, 1});
+  CHECK(f.coordinator.snapshot().output_peak <= 8);
+}
+
 TEST_CASE("Ready partial batches publish while every preparation worker is blocked",
           "[scan_preparation][coordinator]")
 {

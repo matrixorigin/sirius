@@ -75,6 +75,18 @@ void split_connector::push_prepared_scan(std::unique_ptr<op::scan::scan_operator
   _cv.notify_one();
 }
 
+bool split_connector::can_accept_split() const
+{
+  std::lock_guard lock(_mutex);
+  return _closed || _splits.size() < max_ready_splits_;
+}
+
+bool split_connector::wait_for_space(std::stop_token const& stop)
+{
+  std::unique_lock lock(_mutex);
+  return _space.wait(lock, stop, [this] { return _closed || _splits.size() < max_ready_splits_; });
+}
+
 void split_connector::close(std::exception_ptr const& exception)
 {
   {

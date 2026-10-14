@@ -198,6 +198,8 @@ void load_balancing_scan_batch_coalescer::drain_cached_provider(
 {
   auto publish = [&](std::unique_ptr<op::operator_data> split) {
     auto bytes = split->get_estimated_size_in_bytes();
+    // Wait outside the publication gate so consumers can return coordinator credits.
+    if (!connector.wait_for_space(stop)) return false;
     std::unique_lock<std::mutex> gate;
     if (publication) {
       gate = std::unique_lock(publication->mutex);
