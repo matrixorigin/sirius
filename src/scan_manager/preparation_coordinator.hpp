@@ -47,6 +47,9 @@ class preparation_coordinator {
     std::function<bool()> can_claim;
     // Runs under the publication gate before publish; must not wait for I/O or reenter the gate.
     std::function<void(publication&)> prepare_publish;
+    // Optional capacity check under the gate. This source has one publisher, so once ready,
+    // publish must not block while consumers return credits through the same gate.
+    std::function<bool()> can_publish;
   };
   enum class lifecycle { constructed, armed, running, quiescent };
   struct statistics {

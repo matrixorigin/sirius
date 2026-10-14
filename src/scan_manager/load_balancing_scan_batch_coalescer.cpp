@@ -144,7 +144,8 @@ void load_balancing_scan_batch_coalescer::register_coordinator_source(
   source.publish = [slot](preparation_coordinator::publication& publication) {
     slot->connector->push_split_sized(std::move(publication.input), publication.bytes);
   };
-  source.close = [slot] {
+  source.can_publish = [slot] { return slot->connector->can_accept_split(); };
+  source.close       = [slot] {
     if (slot->readahead) slot->readahead->mark_operator_closed(slot->op_id);
     slot->connector->close();
   };
@@ -352,6 +353,9 @@ void load_balancing_scan_batch_coalescer::drain_cached_provider(
 {
   auto publish = [&](std::unique_ptr<op::operator_data> split) {
     auto bytes = split->get_estimated_size_in_bytes();
+    // A consumer returns coordinator credits through the publication gate. Wait for queue
+    // space before taking that gate; this slot has a single publisher, so capacity stays free.
+    if (!connector.wait_for_space(stop)) return false;
     std::unique_lock<std::mutex> gate;
     if (publication) {
       gate = std::unique_lock(publication->mutex);

@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <vector>
 
 namespace cucascade {
@@ -90,6 +91,8 @@ class split_connector : public std::enable_shared_from_this<split_connector> {
   [[nodiscard]] bool is_closed() const;
 
   [[nodiscard]] bool has_more_splits() const;
+  /// True when this connector's single publisher can push without waiting, including closure.
+  [[nodiscard]] bool can_accept_split() const;
 
   /// \brief Snapshot the data batches of pending RESIDENT splits (pinned-cache hits),
   ///        in queue (consumption) order, without popping anything.
@@ -130,11 +133,12 @@ class split_connector : public std::enable_shared_from_this<split_connector> {
   void push_split(std::unique_ptr<op::operator_data> split);
   /// On insertion failure, leave ownership with the caller for cleanup outside its publish lock.
   void push_split_sized(std::unique_ptr<op::operator_data>&& split, size_t bytes);
+  bool wait_for_space(std::stop_token const& stop);
   std::shared_ptr<std::function<void()> const> _on_consumption;
 
   mutable std::mutex _mutex;
   std::condition_variable _cv;
-  std::condition_variable _space;
+  std::condition_variable_any _space;
   std::deque<std::unique_ptr<op::operator_data>> _splits;
   bool _closed{false};
   static constexpr std::size_t max_ready_splits_ = 4;
