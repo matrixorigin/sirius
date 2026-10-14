@@ -8,7 +8,7 @@
 [submodule "substrait"]
 	path = substrait
 	url = https://github.com/matrixorigin/duckdb-substrait.git
-	branch = feature/26155-substrait-anti-joins
+	branch = matrixone
 [submodule "cucascade"]
 	path = cucascade
 	url = https://github.com/NVIDIA/cuCascade.git
