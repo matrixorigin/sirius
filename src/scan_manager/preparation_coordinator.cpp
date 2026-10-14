@@ -458,9 +458,13 @@ bool preparation_coordinator::state::emit_sized_batch(lock_type& lock)
 
 bool preparation_coordinator::state::publish_batch(lock_type& lock)
 {
-  if (batches.empty()) return false;
-  auto batch = std::move(batches.front());
-  batches.pop_front();
+  auto ready = std::find_if(batches.begin(), batches.end(), [&](auto const& batch) {
+    auto const& can_publish = sources[batch.source_id].hooks.can_publish;
+    return !can_publish || can_publish();
+  });
+  if (ready == batches.end()) return false;
+  auto batch = std::move(*ready);
+  batches.erase(ready);
   auto& source = sources[batch.source_id];
   lock.unlock();
   {
@@ -629,11 +633,11 @@ bool preparation_coordinator::state::emit_full_window(lock_type& lock)
 
 bool preparation_coordinator::state::close_finished_source(lock_type& lock)
 {
-  if (!batches.empty()) return false;
   for (size_t id = 0; id < sources.size(); ++id) {
     auto& source = sources[id];
     if (source.status == source_state::phase::closed ||
-        source.status == source_state::phase::enumerating || source.outstanding || !can_emit(id))
+        source.status == source_state::phase::enumerating || source.outstanding || !can_emit(id) ||
+        std::ranges::any_of(batches, [id](auto const& batch) { return batch.source_id == id; }))
       continue;
     if (source.status == source_state::phase::enumeration_done) {
       lock.unlock();

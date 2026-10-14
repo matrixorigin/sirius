@@ -59,6 +59,18 @@ void split_connector::push_split_sized(std::unique_ptr<op::operator_data>&& spli
   _cv.notify_one();
 }
 
+bool split_connector::can_accept_split() const
+{
+  std::lock_guard lock(_mutex);
+  return _closed || _splits.size() < max_ready_splits_;
+}
+
+bool split_connector::wait_for_space(std::stop_token const& stop)
+{
+  std::unique_lock lock(_mutex);
+  return _space.wait(lock, stop, [this] { return _closed || _splits.size() < max_ready_splits_; });
+}
+
 void split_connector::close(std::exception_ptr const& exception)
 {
   {

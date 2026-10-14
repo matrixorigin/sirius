@@ -60,6 +60,20 @@ struct gated_provider final : databatch_provider {
   }
 };
 
+struct repeated_provider final : databatch_provider {
+  repeated_provider()
+  {
+    validation.identity = validation.layout = validation.structure = {true, true};
+  }
+  std::shared_ptr<cucascade::data_batch> value;
+  std::atomic<int> calls{0};
+  databatch_provider::batch get_next_batch() override
+  {
+    if (calls++ < 6) return {value, {}, false};
+    return {};
+  }
+};
+
 bool wait_for(const std::function<bool()>& done,
               std::chrono::seconds timeout = std::chrono::seconds{5})
 {
@@ -145,4 +159,53 @@ TEST_CASE("split_connector failure before the first pop remains schedulable",
   CHECK_FALSE(connector.is_closed());
   CHECK(connector.is_discovery_complete());
   CHECK_THROWS_WITH(connector.get_next_split(), "early metadata refusal");
+}
+
+TEST_CASE("A full cached split queue releases the publication gate and observes cancellation",
+          "[split_connector][scan_manager]")
+{
+  auto memory_manager = sirius::test::operator_utils::initialize_memory_manager();
+  auto* gpu_space     = memory_manager->get_memory_space(cucascade::memory::Tier::GPU, 0);
+  REQUIRE(gpu_space);
+  repeated_provider provider;
+  provider.value = sirius::test::operator_utils::make_numeric_batch<int32_t>(
+    *gpu_space, {1}, cudf::type_id::INT32);
+  split_connector connector;
+  auto publication = std::make_shared<sirius::scan_manager::preparation_gate>();
+  std::stop_source stop;
+  std::atomic<bool> returned{false};
+  std::exception_ptr error;
+  std::thread producer([&] {
+    try {
+      load_balancing_scan_batch_coalescer::drain_cached_provider(provider,
+                                                                 connector,
+                                                                 stop.get_token(),
+                                                                 false,
+                                                                 {},
+                                                                 0,
+                                                                 nullptr,
+                                                                 false,
+                                                                 false,
+                                                                 {},
+                                                                 0,
+                                                                 publication);
+    } catch (...) {
+      error = std::current_exception();
+    }
+    returned = true;
+  });
+  CHECK(wait_for([&] { return provider.calls >= 5; }));
+  CHECK(wait_for(
+    [&] {
+      std::unique_lock lock(publication->mutex, std::try_to_lock);
+      return lock.owns_lock();
+    },
+    std::chrono::seconds{1}));
+  stop.request_stop();
+  CHECK(wait_for([&] { return returned.load(); }, std::chrono::seconds{1}));
+  // Also unblock an implementation that ignores cancellation, so a failed assertion is bounded.
+  connector.close();
+  producer.join();
+  CHECK_FALSE(error);
+  CHECK(provider.calls == 5);
 }

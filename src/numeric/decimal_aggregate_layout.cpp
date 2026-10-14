@@ -225,14 +225,14 @@ std::unique_ptr<cudf::table> finish(cudf::table_view input,
         owner->finalized.push_back(cudf::binary_operation(source,
                                                           input.column(slot.state_index + 1),
                                                           cudf::binary_operator::DIV,
-                                                          get_cudf_type(slot.output_type),
+                                                          require_cudf_type(slot.output_type),
                                                           stream,
                                                           mr));
       else if (slot.distinct) {
         owner->temporaries.push_back(
           cudf::lists::count_elements(cudf::lists_column_view(source), stream, mr));
         owner->finalized.push_back(cudf::cast(
-          owner->temporaries.back()->view(), get_cudf_type(slot.output_type), stream, mr));
+          owner->temporaries.back()->view(), require_cudf_type(slot.output_type), stream, mr));
       } else
         owner->finalized.push_back(std::make_unique<cudf::column>(source, stream, mr));
     }
@@ -495,7 +495,7 @@ std::unique_ptr<cudf::table> compute(cudf::table_view input,
         owner->pending.reset();
         continue;
       }
-      auto type = get_cudf_type(slot.output_type);
+      auto type = require_cudf_type(slot.output_type);
       if (slot.distinct) {
         owner->columns.push_back(ordinary(
           *owner,
@@ -506,7 +506,7 @@ std::unique_ptr<cudf::table> compute(cudf::table_view input,
           stream,
           mr));
       } else if (slot.avg()) {
-        auto sum_type = get_cudf_type(ordinary_sum_type(slot.input_type));
+        auto sum_type = require_cudf_type(ordinary_sum_type(slot.input_type));
         owner->columns.push_back(
           ordinary(*owner, source, cudf::aggregation::Kind::SUM, sum_type, grouped, stream, mr));
         owner->columns.push_back(

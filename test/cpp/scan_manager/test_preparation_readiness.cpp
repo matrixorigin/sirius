@@ -243,7 +243,8 @@ struct fixture {
   void source(std::shared_ptr<accumulator> a,
               std::shared_ptr<sink> out,
               std::function<std::optional<preparation_coordinator::job>()> claim,
-              std::shared_ptr<hold> construction = {})
+              std::shared_ptr<hold> construction = {},
+              std::function<bool()> can_publish  = {})
   {
     coordinator.add_source(
       {a,
@@ -280,7 +281,8 @@ struct fixture {
          out->cv.notify_all();
        },
        [out](std::function<void(size_t)> consume) { out->consumed = std::move(consume); },
-       {}});
+       {},
+       std::move(can_publish)});
   }
 };
 }  // namespace
@@ -312,6 +314,45 @@ TEST_CASE("Default and zero job limits allow submission while the worker is bloc
   f.finish();
   CHECK(out->count() == 1);
   CHECK_FALSE(f.owner_error);
+}
+
+TEST_CASE("A full connector does not block publication or closure of another source",
+          "[scan_preparation][coordinator]")
+{
+  fixture f;
+  auto blocked       = std::make_shared<sink>();
+  auto ready         = std::make_shared<sink>();
+  auto release_other = f.make_hold();
+  std::atomic<bool> capacity{false};
+  f.source(std::make_shared<accumulator>(1),
+           blocked,
+           single_job([] { return std::make_unique<tagged>(7); }),
+           {},
+           [&] {
+             release_other->release();
+             return capacity.load();
+           });
+  f.source(std::make_shared<accumulator>(1), ready, finite_jobs(2, [=](int id) {
+             release_other->wait();
+             return std::make_unique<tagged>(id);
+           }));
+  auto query_guard = f.shutdown_guard();
+  f.start();
+  REQUIRE(ready->await(2));
+  CHECK(blocked->count() == 0);
+  CHECK(blocked->preparations == 0);
+  ready->consume();
+  ready->consume();
+  REQUIRE(ready->await_closed());
+  CHECK_FALSE(blocked->closed.load());
+  capacity = true;
+  f.coordinator.wake_for_testing();
+  REQUIRE(blocked->await(1));
+  blocked->consume();
+  f.finish();
+  CHECK(blocked->published == std::vector<int>{7});
+  CHECK(ready->published == std::vector<int>{0, 1});
+  CHECK(f.coordinator.snapshot().output_peak <= 4);
 }
 
 TEST_CASE("Ready partial batches publish while every preparation worker is blocked",

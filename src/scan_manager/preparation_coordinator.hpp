@@ -53,6 +53,9 @@ class preparation_coordinator {
     std::function<void()> close;
     std::function<void(std::function<void(size_t)>)> bind_consumption;
     std::function<bool()> can_claim;
+    // Optional capacity check under the gate. This source has one publisher, so once ready,
+    // publish must not block while consumers return credits through the same gate.
+    std::function<bool()> can_publish;
   };
   enum class lifecycle { constructed, armed, running, quiescent };
   struct statistics {
