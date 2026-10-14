@@ -43,7 +43,7 @@ Quick start:
 ```bash
 git clone --no-recurse-submodules https://github.com/sirius-db/sirius.git
 cd sirius
-git submodule update --init --depth=1 --jobs 3 duckdb substrait cucascade
+git submodule update --init --depth=1 --jobs 4 duckdb substrait cucascade tae-scanner
 pixi run make TEST_BUILD_TARGET=
 ./build/release/duckdb
 ```
@@ -70,6 +70,24 @@ SET GLOBAL gpu_execution = false;
 ```
 
 Execution is out-of-core with tiered memory management (GPU/host/disk), automatic data partitioning, and spilling, and works with both **Parquet** and **DuckDB-native** storage. See [`gpu_execution`](gpu_execution.md) for build, configuration, and testing details.
+
+### MatrixOne embedding
+
+The `mo` Pixi environment supports Linux x86_64 and ARM64/aarch64 and pins CUDA 13.3,
+GCC 14, and cuDF/cuVS 26.08.01. After initializing the submodules above, build the
+embedding SDK with:
+
+```bash
+pixi run --frozen -e mo mo-build-embedding-sdk
+```
+
+See the [MatrixOne embedding toolchain guide](embedding-gpu-toolchain.md) for SDK
+and runtime setup.
+
+The [CI build matrix](../.github/workflows/check.yml) includes ARM64 GCC Release
+and Clang Debug builds using the `default` environment. These run on merge-queue
+events and pushes to `main`; pull requests skip the ARM64 jobs. The `mo`
+environment is not currently built or tested in CI.
 
 ## Python API
 
