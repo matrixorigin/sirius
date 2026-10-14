@@ -47,6 +47,10 @@ TEST_CASE("dispatcher settles a refused pool submission", "[scoped_dispatcher]")
   {
     CHECK_THROWS_WITH(dispatcher.schedule([] {}), "thread pool is stopped");
   }
+  SECTION("try_schedule")
+  {
+    CHECK_THROWS_WITH(dispatcher.try_schedule([] {}), "thread pool is stopped");
+  }
   dispatcher.wait_for_all();
   CHECK_FALSE(dispatcher.schedule([] {}));
   bool executed = false;
@@ -91,6 +95,10 @@ TEST_CASE("failed dispatcher submission discards pending work without executing 
   SECTION("schedule")
   {
     CHECK_THROWS_WITH(dispatcher.schedule(std::move(task)), "thread pool is stopped");
+  }
+  SECTION("try_schedule")
+  {
+    CHECK_THROWS_WITH(dispatcher.try_schedule(std::move(task)), "thread pool is stopped");
   }
   dispatcher.wait_for_all();
   CHECK(executed == 0);
