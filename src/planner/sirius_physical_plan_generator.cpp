@@ -732,15 +732,20 @@ build_duckdb_native_table_info(sirius::op::sirius_physical_table_scan& scan_op,
 //! scanner's bind data remains owned by the CPU plan, so retain a private copy
 //! for metadata workers that can outlive plan conversion.
 std::unique_ptr<sirius::op::scan::tae_ingestible_table_info> build_tae_table_info(
-  sirius::op::sirius_physical_table_scan& scan_op, duckdb::ClientContext& context)
+  sirius::op::sirius_physical_table_scan& scan_op,
+  const sirius::operator_params& op_params,
+  duckdb::ClientContext& context)
 {
   if (!scan_op.bind_data) {
     throw std::runtime_error(
       "[sirius_physical_plan_generator::build_tae_table_info] tae_scan has no bind data");
   }
 
-  auto info         = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
-  info->contract_id = scan_op.contract_id;
+  auto info                    = std::make_unique<sirius::op::scan::tae_ingestible_table_info>();
+  info->contract_id            = scan_op.contract_id;
+  info->approximate_batch_size = op_params.scan_task_batch_size == 0
+                                   ? sirius::config::DEFAULT_SCAN_TASK_BATCH_SIZE
+                                   : op_params.scan_task_batch_size;
   duckdb::unique_ptr<duckdb::FunctionData> copied_bind_data;
   if (scan_op.function.GetName() == sirius::embedding::embedded_tae_function) {
     auto const* embedded =
@@ -1908,7 +1913,7 @@ duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_tae_scan(
                  ? context.registered_state->Get<duckdb::SiriusContext>("sirius_state")
                  : nullptr;
   return make_gpu_scan_leaf(
-    build_tae_table_info(scan, context), scan, op_params, mode, state.get());
+    build_tae_table_info(scan, op_params, context), scan, op_params, mode, state.get());
 }
 
 duckdb::unique_ptr<sirius::op::sirius_physical_operator> lower_native_scan(

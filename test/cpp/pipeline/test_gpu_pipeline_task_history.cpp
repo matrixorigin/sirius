@@ -711,6 +711,7 @@ TEST_CASE("gpu_pipeline_task retains input owner through failed quiescence",
   REQUIRE(task_local != nullptr);
   task_local->set_reservation(std::move(reservation),
                               task->get_estimated_reservation_size_info(fixture.gpu_space));
+  advance_to_reserving(*task);
 
   REQUIRE_THROWS_AS(task->execute(stream), sirius::pipeline::gpu_stream_quiescence_error);
   CHECK(task->input_was_alive_during_quiescence());

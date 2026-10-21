@@ -83,7 +83,7 @@ host_tae_representation::host_tae_representation(const host_tae_representation& 
 }
 
 std::unique_ptr<cucascade::idata_representation> host_tae_representation::clone(
-  ::cuda::stream_ref /*stream*/)
+  ::cuda::stream_ref /*stream*/) const
 {
   if (_input_lease) {
     throw std::runtime_error("one-pass MO native input representation cannot be cloned");

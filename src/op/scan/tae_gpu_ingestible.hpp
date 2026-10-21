@@ -13,6 +13,7 @@
 #include <embedding/tae_demand.hpp>
 #include <op/scan/gpu_ingestible.hpp>
 #include <op/scan/tae_scan_plan.hpp>
+#include <sirius_config.hpp>
 
 #include <atomic>
 #include <memory>
@@ -30,6 +31,7 @@ namespace sirius::op::scan {
 
 class tae_ingestible_table_info final : public ingestible_table_info {
  public:
+  std::size_t approximate_batch_size = sirius::config::DEFAULT_SCAN_TASK_BATCH_SIZE;
   duckdb::unique_ptr<tae::TAEScanBindData> bind_data;
   bool embedded_manifest{false};
   std::shared_ptr<sirius::embedding::buffer_budget> embedded_host_budget;
@@ -116,7 +118,8 @@ class tae_gpu_ingestible final : public gpu_ingestible {
     const cucascade::memory::memory_space& mem_space,
     ::cuda::stream_ref stream,
     bool like_swar_fastpath,
-    std::shared_ptr<const sirius::like_multiliteral_cache> like_cache) override;
+    std::shared_ptr<const sirius::like_multiliteral_cache> like_cache,
+    expression_query_policy policy = {}) override;
 
   std::unique_ptr<cudf::table> post_filter_and_project(
     filtered_table&& input,
@@ -125,7 +128,8 @@ class tae_gpu_ingestible final : public gpu_ingestible {
     bool like_swar_fastpath,
     std::shared_ptr<const sirius::like_multiliteral_cache> like_cache,
     std::unique_ptr<cudf::column>* survivors,
-    std::span<std::size_t const> elided) override;
+    std::span<std::size_t const> elided,
+    expression_query_policy policy = {}) override;
 
   [[nodiscard]] const ingestible_table_info& table_info() const noexcept override { return *_info; }
   [[nodiscard]] std::vector<std::size_t> materialized_column_order() const override;

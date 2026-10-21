@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "embedding/plan_bindings.hpp"
 #include "exec/stream_bind_catalog.hpp"
 #include "exec/stream_plan_bindings.hpp"
 #include "helper/type_conversions.hpp"
@@ -106,6 +107,16 @@ using sirius::test::require_registered_callbacks;
 
 duckdb::TableCatalogEntry* replacement_table = nullptr;
 
+duckdb::unique_ptr<duckdb::FunctionData> additional_scan_bind(std::string_view name)
+{
+  if (name == sirius::embedding::embedded_mo_function)
+    return duckdb::make_uniq<sirius::embedding::embedded_mo_bind_data>();
+  if (name == sirius::embedding::embedded_tae_function)
+    return duckdb::make_uniq<sirius::embedding::embedded_tae_bind_data>();
+  if (name == "tae_scan") return duckdb::make_uniq<tae::TAEScanBindData>();
+  return nullptr;
+}
+
 duckdb::unique_ptr<duckdb::FunctionData> replacement_bind(
   duckdb::ClientContext&,
   duckdb::TableFunctionBindInput& input,
@@ -120,6 +131,7 @@ duckdb::unique_ptr<duckdb::FunctionData> replacement_bind(
     return duckdb::make_uniq<duckdb::SiriusReadParquetBindData>("s3://bucket/a.parquet", 1);
   if (name == "sirius_stream_source")
     return duckdb::make_uniq<sirius::exec::stream_source_bind_data>(1);
+  if (auto bind = additional_scan_bind(name.GetIdentifierName())) return bind;
   return duckdb::make_uniq<duckdb::MultiFileBindData>();
 }
 
@@ -450,10 +462,12 @@ TEST_CASE_METHOD(sirius::test::GpuExecutionFixture,
   run_ok("ROLLBACK");
 }
 
-TEST_CASE("Scan registry verifies all six catalog functions", "[scan][contracts][shared_context]")
+TEST_CASE("Scan registry verifies public and embedded catalog functions",
+          "[scan][contracts][shared_context]")
 {
   REQUIRE(sirius::test::g_shared_env);
   auto con = sirius::test::g_shared_env->make_connection();
+  sirius::embedding::register_embedded_read_functions(*con.context->db);
   REQUIRE_FALSE(con.Query("SET gpu_execution=false")->HasError());
   REQUIRE_FALSE(con.Query("LOAD iceberg")->HasError());
   REQUIRE_FALSE(con.Query("CREATE TEMP TABLE r1_registry_native(id INTEGER)")->HasError());
@@ -476,6 +490,9 @@ TEST_CASE("Scan registry verifies all six catalog functions", "[scan][contracts]
                                          "read_parquet",
                                          "sirius_read_parquet",
                                          "iceberg_scan",
+                                         "tae_scan",
+                                         sirius::embedding::embedded_mo_function,
+                                         sirius::embedding::embedded_tae_function,
                                          "sirius_stream_source"});
   for (auto const& name : names) {
     auto& catalog_entry = duckdb::Catalog::GetSystemCatalog(*con.context)
@@ -490,6 +507,8 @@ TEST_CASE("Scan registry verifies all six catalog functions", "[scan][contracts]
         bind = duckdb::make_uniq<duckdb::SiriusReadParquetBindData>("s3://bucket/a.parquet", 1);
       } else if (name == "sirius_stream_source") {
         bind = duckdb::make_uniq<sirius::exec::stream_source_bind_data>(1);
+      } else if (auto additional = additional_scan_bind(name)) {
+        bind = std::move(additional);
       } else {
         bind = duckdb::make_uniq<duckdb::MultiFileBindData>();
       }
@@ -1219,6 +1238,7 @@ TEST_CASE("Scan registry first lookup child", "[.][registry_trust_child][shared_
   if (!phase) return;
   REQUIRE(sirius::test::g_shared_env);
   auto con = sirius::test::g_shared_env->make_connection();
+  sirius::embedding::register_embedded_read_functions(*con.context->db);
   REQUIRE_FALSE(con.Query("SET gpu_execution=false")->HasError());
   REQUIRE_FALSE(con.Query("LOAD iceberg")->HasError());
   REQUIRE_FALSE(con.Query("CREATE TEMP TABLE r1_replacement_native(id INTEGER)")->HasError());
@@ -1241,6 +1261,8 @@ TEST_CASE("Scan registry first lookup child", "[.][registry_trust_child][shared_
       bind = duckdb::make_uniq<duckdb::SiriusReadParquetBindData>("s3://bucket/a.parquet", 1);
     else if (source.function_name == "sirius_stream_source")
       bind = duckdb::make_uniq<sirius::exec::stream_source_bind_data>(1);
+    else if (auto additional = additional_scan_bind(source.function_name))
+      bind = std::move(additional);
     else
       bind = duckdb::make_uniq<duckdb::MultiFileBindData>();
     bool const nested = std::string_view(phase).find("nested_") != std::string_view::npos;
