@@ -180,6 +180,9 @@ void upload_embedded_payload(tae_scan_info const& info,
 
 class passthrough_coalescer final : public batch_coalescer {
  public:
+  explicit passthrough_coalescer(std::size_t target_bytes) : _target_bytes(target_bytes) {}
+  std::size_t target_batch_bytes() const noexcept override { return _target_bytes; }
+
   cursor_step advance(scan_info& input, size_t& cursor, size_t quantum) override
   {
     if (cursor) return {{}, true};
@@ -215,6 +218,9 @@ class passthrough_coalescer final : public batch_coalescer {
   }
 
   std::vector<std::unique_ptr<scan_info>> flush() override { return {}; }
+
+ private:
+  std::size_t _target_bytes;
 };
 
 std::vector<std::uint8_t> decompress_metadata_lz4(const std::uint8_t* src,
@@ -700,7 +706,7 @@ std::unique_ptr<tae_scan_info> tae_gpu_ingestible::plan_live_split(
 
 std::unique_ptr<batch_coalescer> tae_gpu_ingestible::create_batch_coalescer() const
 {
-  return std::make_unique<passthrough_coalescer>();
+  return std::make_unique<passthrough_coalescer>(_info->approximate_batch_size);
 }
 
 bool tae_gpu_ingestible::has_processed_all_metadata() const
@@ -740,7 +746,8 @@ gpu_ingestible::metadata_scan_task_t tae_gpu_ingestible::next_split_provider(
   auto const file_path =
     _info->bind_data->data_dir + "/" + _info->bind_data->objects[object_index].file_path;
   auto io_ctx = resolve(file_path);
-  return [this, object_index, block_index, io_ctx = std::move(io_ctx)] {
+  return [this, object_index, block_index, io_ctx = std::move(io_ctx)](std::stop_token stop) {
+    std::stop_callback stop_metadata(stop, [this] { stop_metadata_scan(); });
     auto result = load_object(object_index, block_index, io_ctx);
     result->set_contract_payload(_info->contract_id, {}, {});
     return result;
@@ -889,7 +896,7 @@ std::unique_ptr<cudf::table> tae_gpu_ingestible::make_empty_table(
   std::vector<std::unique_ptr<cudf::column>> columns;
   columns.reserve(_info->output_types.size());
   for (auto const& logical : _info->output_types) {
-    auto const native = sirius::try_get_cudf_type(logical);
+    auto const native = sirius::get_cudf_type(logical);
     if (!native) { throw std::runtime_error("TAE empty result has an unsupported output type"); }
     columns.push_back(cudf::make_empty_column(*native));
   }
@@ -901,7 +908,8 @@ filtered_table tae_gpu_ingestible::materialize_metadata_to_table(
   const cucascade::memory::memory_space& mem_space,
   ::cuda::stream_ref native_stream,
   bool,
-  std::shared_ptr<const sirius::like_multiliteral_cache>)
+  std::shared_ptr<const sirius::like_multiliteral_cache>,
+  expression_query_policy /*policy*/)
 {
   rmm::cuda_stream_view stream{native_stream};
   auto const& info = dynamic_cast<tae_scan_info const&>(generic_info);
@@ -943,7 +951,8 @@ std::unique_ptr<cudf::table> tae_gpu_ingestible::post_filter_and_project(
   bool like_swar_fastpath,
   std::shared_ptr<const sirius::like_multiliteral_cache> like_cache,
   std::unique_ptr<cudf::column>* survivors,
-  std::span<std::size_t const> elided)
+  std::span<std::size_t const> elided,
+  expression_query_policy policy)
 {
   rmm::cuda_stream_view stream{native_stream};
   rmm::device_async_resource_ref mr_ref(mem_space.get_default_allocator());
@@ -960,7 +969,7 @@ std::unique_ptr<cudf::table> tae_gpu_ingestible::post_filter_and_project(
     sirius::expression_evaluator evaluator(filter.get(),
                                            mr_ref,
                                            stream,
-                                           sirius::strategy_from_config(),
+                                           policy,
                                            sirius::expression_evaluator::default_min_ast_size,
                                            like_swar_fastpath,
                                            std::move(like_cache));

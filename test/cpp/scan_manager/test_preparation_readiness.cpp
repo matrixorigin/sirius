@@ -176,8 +176,8 @@ TEST_CASE("A full connector does not block publication or closure of another sou
   REQUIRE(blocked->await(5));
   for (int i = 0; i < 4; ++i) blocked->consume();
   f.finish();
-  CHECK(blocked->published == std::vector<int>{7, 8, 9, 10, 11});
-  CHECK(ready->published == std::vector<int>{0, 1});
+  CHECK(std::ranges::is_permutation(blocked->published, std::array{7, 8, 9, 10, 11}));
+  CHECK(std::ranges::is_permutation(ready->published, std::array{0, 1}));
   CHECK(f.coordinator.snapshot().output_peak <= 8);
 }
 

@@ -119,7 +119,8 @@ class native_ingestible final : public op::scan::gpu_ingestible {
     cucascade::memory::memory_space const& space,
     ::cuda::stream_ref stream,
     bool,
-    std::shared_ptr<const like_multiliteral_cache>) override
+    std::shared_ptr<const like_multiliteral_cache>,
+    expression_query_policy) override
   {
     auto const& split = dynamic_cast<native_split const&>(info);
     rmm::cuda_stream_view rmm_stream{stream};
@@ -134,7 +135,8 @@ class native_ingestible final : public op::scan::gpu_ingestible {
     bool,
     std::shared_ptr<const like_multiliteral_cache>,
     std::unique_ptr<cudf::column>*,
-    std::span<const std::size_t>) override
+    std::span<const std::size_t>,
+    expression_query_policy) override
   {
     return table.table.release(stream);
   }

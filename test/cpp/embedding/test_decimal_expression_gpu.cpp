@@ -154,7 +154,8 @@ TEST_CASE("MO exact null predicates consume canonical validity in every evaluato
           if (parent_not)
             expression = std::make_unique<ast::node>(
               ast::unary_op{ast::unary_op::kind::op_not, std::move(expression)});
-          expression_evaluator evaluator(*expression, mr, stream.view(), strategy);
+          expression_evaluator evaluator(
+            *expression, mr, stream.view(), expression_query_policy{strategy});
           for (std::size_t i = 0; i < inputs.size(); ++i) {
             auto expected = nulls[i];
             if (is_null == parent_not)

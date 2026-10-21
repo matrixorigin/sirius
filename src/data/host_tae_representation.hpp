@@ -199,7 +199,7 @@ class host_tae_representation : public cucascade::idata_representation {
                           std::unique_ptr<host_tae_input_lease> input_lease        = nullptr);
 
   // idata_representation interface
-  std::unique_ptr<idata_representation> clone(::cuda::stream_ref stream) override;
+  std::unique_ptr<idata_representation> clone(::cuda::stream_ref stream) const override;
   [[nodiscard]] std::size_t get_size_in_bytes() const override;
   [[nodiscard]] std::size_t get_uncompressed_data_size_in_bytes() const override;
 
@@ -212,7 +212,7 @@ class host_tae_representation : public cucascade::idata_representation {
   // through bounded host slices. Legacy/MO callers keep the contiguous path.
   void set_device_loader(device_loader loader) { _device_loader = std::move(loader); }
   [[nodiscard]] device_loader const& get_device_loader() const { return _device_loader; }
-  void mark_h2d_complete() noexcept
+  void mark_h2d_complete() const noexcept
   {
     if (_input_lease) { _input_lease->mark_h2d_complete(); }
   }
