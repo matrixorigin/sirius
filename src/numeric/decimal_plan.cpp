@@ -482,7 +482,19 @@ void fold_exact_import_constants(duckdb::ClientContext& context,
                                                 [&](duckdb::unique_ptr<duckdb::Expression>& child) {
                                                   fold_exact_import_constants(context, child);
                                                 });
-  if (from_duckdb_type(expression->GetReturnType()) && expression->IsFoldable() &&
+  // DuckDB reconstructs ordinary typed literals (including DATE) as casts of
+  // parser literals. Exact plans skip its optimizer, so materialize those
+  // constants here too; cuDF's generic cast cannot consume their VARCHAR input.
+  // Private carrier alias casts must survive until bound-type restoration.
+  // Keep casts of row expressions and unrelated ordinary functions unchanged.
+  bool literal_cast = false;
+  if (duckdb::BoundCastExpression::IsCast(*expression)) {
+    auto const& child =
+      duckdb::BoundCastExpression::Child(expression->Cast<duckdb::BoundFunctionExpression>());
+    literal_cast = child.GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT &&
+                   !from_duckdb_type(child.GetReturnType());
+  }
+  if ((from_duckdb_type(expression->GetReturnType()) || literal_cast) && expression->IsFoldable() &&
       expression->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
     expression = duckdb::make_uniq<duckdb::BoundConstantExpression>(
       duckdb::ExpressionExecutor::EvaluateScalar(context, *expression));

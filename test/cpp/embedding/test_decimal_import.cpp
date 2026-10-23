@@ -12,8 +12,86 @@
 #include <duckdb/main/relation.hpp>
 #include <duckdb/planner/expression/bound_cast_expression.hpp>
 #include <duckdb/planner/expression/bound_constant_expression.hpp>
+#include <duckdb/planner/expression/bound_reference_expression.hpp>
 
 using namespace sirius;
+
+TEST_CASE("MO exact import materializes ordinary typed literal casts", "[decimal_import]")
+{
+  decimal_fixture::importer fixture;
+  auto& context = *fixture.connection.context;
+  // SUBSTRING admission requires constant BIGINT bounds, not casts around
+  // parser INTEGER literals, even when the surrounding plan uses exact decimals.
+  for (int32_t bound : {1, 2}) {
+    auto expression = duckdb::BoundCastExpression::AddDefaultCastToType(
+      duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value::INTEGER(bound)),
+      duckdb::LogicalType::BIGINT);
+    REQUIRE(duckdb::BoundCastExpression::IsCast(*expression));
+    mo_decimal::fold_exact_import_constants(context, expression);
+    REQUIRE(expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT);
+    CHECK(expression->GetReturnType() == duckdb::LogicalType::BIGINT);
+    CHECK(expression->Cast<duckdb::BoundConstantExpression>().GetValue().GetValue<int64_t>() ==
+          bound);
+  }
+  for (auto date : {duckdb::Date::FromDate(0, 12, 31),
+                    duckdb::Date::FromDate(1, 1, 1),
+                    duckdb::Date::FromDate(2000, 2, 29),
+                    duckdb::Date::FromDate(9999, 12, 31)}) {
+    auto expected   = duckdb::Value::DATE(date);
+    auto expression = duckdb::BoundCastExpression::AddDefaultCastToType(
+      duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value(expected.ToString())),
+      duckdb::LogicalType::DATE);
+    REQUIRE(duckdb::BoundCastExpression::IsCast(*expression));
+    mo_decimal::fold_exact_import_constants(context, expression);
+    REQUIRE(expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT);
+    CHECK(expression->GetReturnType() == duckdb::LogicalType::DATE);
+    CHECK(
+      expression->Cast<duckdb::BoundConstantExpression>().GetValue().GetValue<duckdb::date_t>() ==
+      date);
+  }
+  auto null = duckdb::BoundCastExpression::AddDefaultCastToType(
+    duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value()), duckdb::LogicalType::DATE);
+  mo_decimal::fold_exact_import_constants(context, null);
+  REQUIRE(null->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT);
+  CHECK(null->GetReturnType() == duckdb::LogicalType::DATE);
+  CHECK(null->Cast<duckdb::BoundConstantExpression>().GetValue().IsNull());
+
+  auto invalid = [](bool try_cast) {
+    return duckdb::BoundCastExpression::AddDefaultCastToType(
+      duckdb::make_uniq<duckdb::BoundConstantExpression>(duckdb::Value("invalid date")),
+      duckdb::LogicalType::DATE,
+      try_cast);
+  };
+  auto throwing = invalid(false);
+  REQUIRE_THROWS(mo_decimal::fold_exact_import_constants(context, throwing));
+  auto trying = invalid(true);
+  mo_decimal::fold_exact_import_constants(context, trying);
+  REQUIRE(trying->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT);
+  CHECK(trying->Cast<duckdb::BoundConstantExpression>().GetValue().IsNull());
+
+  auto row_cast = duckdb::BoundCastExpression::AddDefaultCastToType(
+    duckdb::make_uniq<duckdb::BoundReferenceExpression>(duckdb::LogicalType::VARCHAR, 0),
+    duckdb::LogicalType::DATE);
+  mo_decimal::fold_exact_import_constants(context, row_cast);
+  CHECK(duckdb::BoundCastExpression::IsCast(*row_cast));
+
+  // DuckDB also inserts casts that erase private carrier aliases in CASE.
+  // Those belong to bound-type restoration, including for constant branches.
+  for (uint16_t bits : {64, 128, 256}) {
+    auto logical    = logical_type::make_mo_decimal({bits, 15, 2}, true);
+    auto carrier    = mo_decimal::duckdb_type(logical);
+    auto plain      = carrier.WithAlias("");
+    auto alias_cast = duckdb::BoundCastExpression::AddDefaultCastToType(
+      duckdb::make_uniq<duckdb::BoundConstantExpression>(
+        mo_decimal::duckdb_value(decimal_fixture::small(125), logical)),
+      plain);
+    REQUIRE(duckdb::BoundCastExpression::IsCast(*alias_cast));
+    mo_decimal::fold_exact_import_constants(context, alias_cast);
+    REQUIRE(duckdb::BoundCastExpression::IsCast(*alias_cast));
+    mo_decimal::restore_exact_bound_types(alias_cast);
+    CHECK(alias_cast->GetReturnType() == carrier);
+  }
+}
 
 TEST_CASE("MO opaque carriers preserve following SQL root columns", "[decimal_import]")
 {
