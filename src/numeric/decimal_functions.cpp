@@ -133,7 +133,8 @@ duckdb::unique_ptr<duckdb::FunctionData> bind_scalar(duckdb::BindScalarFunctionI
   auto& arguments = input.GetArguments();
   for (auto& argument : arguments)
     fold_exact_import_constants(input.GetClientContext(), argument);
-  auto id = from_duckdb_function_name(fn.GetName().GetIdentifierName());
+  auto id = from_duckdb_function_name(fn.GetName().GetIdentifierName(),
+                                      arguments.empty() ? 0 : arguments.size() - 1);
   if (!id || !is_decimal_function(*id) || arguments.empty() ||
       arguments.back()->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT)
     throw duckdb::InvalidInputException("invalid MO decimal binding marker");
@@ -211,7 +212,8 @@ void register_scalar_functions(duckdb::DatabaseInstance& instance)
 void validate_bound_scalar(duckdb::BoundFunctionExpression const& expression)
 {
   auto data = dynamic_cast<scalar_data const*>(expression.BindInfo().get());
-  auto id   = from_duckdb_function_name(expression.Function().GetName().GetIdentifierName());
+  auto id   = from_duckdb_function_name(expression.Function().GetName().GetIdentifierName(),
+                                      expression.GetChildren().size());
   if (!data || !id || !is_decimal_function(*id) || data->op != operation(*id) ||
       data->output != expression.GetReturnType() ||
       data->inputs.size() != expression.GetChildren().size() ||

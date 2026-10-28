@@ -175,7 +175,7 @@ struct wire_validator {
       if (found == functions.end())
         throw std::invalid_argument("unknown exact-plan function anchor");
       if (exact_functions.contains(function->function_reference())) {
-        auto id = from_duckdb_function_name("__sirius_" + found->second);
+        auto id = from_duckdb_function_name("__sirius_" + found->second, args.size());
         if (!id || !is_decimal_function(*id))
           throw std::invalid_argument("invalid MO scalar identity");
         validate_signature(operation(*id), args, result);
@@ -575,7 +575,8 @@ void rewrite_expression(duckdb::unique_ptr<duckdb::Expression>& expression, bool
     [&](duckdb::unique_ptr<duckdb::Expression>& child) { rewrite_expression(child, comparisons); });
   if (expression->GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION) {
     auto& fn = expression->Cast<duckdb::BoundFunctionExpression>();
-    auto id  = from_duckdb_function_name(fn.Function().GetName().GetIdentifierName());
+    auto id  = from_duckdb_function_name(fn.Function().GetName().GetIdentifierName(),
+                                        fn.GetChildren().size());
     if (id && is_decimal_function(*id)) {
       validate_bound_scalar(fn);
       if (operation(*id) == decimal_op::cast &&

@@ -156,7 +156,7 @@ class importer final : public duckdb::SubstraitExtensionHandler {
     if (!Handles(identity) || !scalar.has_output_type() ||
         scalar.arguments_size() != static_cast<int>(children.size()) || scalar.options_size())
       throw std::invalid_argument("invalid MO exact-decimal scalar signature");
-    auto id = from_duckdb_function_name("__sirius_" + identity.name);
+    auto id = from_duckdb_function_name("__sirius_" + identity.name, children.size());
     if (!id || !is_decimal_function(*id))
       throw std::invalid_argument("unknown MO exact-decimal scalar identity");
     auto op = operation(*id);

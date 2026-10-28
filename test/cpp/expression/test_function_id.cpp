@@ -443,6 +443,23 @@ TEST_CASE("ast_function_id - argument counts follow the GPU handlers", "[ast_fun
 TEST_CASE("ast_function_id - to_duckdb_function_name rejects an id outside the enum",
           "[ast_function_id]")
 {
-  auto const past_end = static_cast<function_id>(static_cast<uint16_t>(function_id::negate) + 1);
+  auto const past_end =
+    static_cast<function_id>(static_cast<uint16_t>(function_id::mo_decimal_greater_equal) + 1);
   REQUIRE_THROWS_AS(to_duckdb_function_name(past_end), sirius::internal_exception);
+}
+
+TEST_CASE("ast_function_id - MO decimal names enforce bound operand counts", "[ast_function_id]")
+{
+  for (auto raw = static_cast<uint16_t>(function_id::mo_decimal_add);
+       raw <= static_cast<uint16_t>(function_id::mo_decimal_greater_equal);
+       ++raw) {
+    auto const id = static_cast<function_id>(raw);
+    auto const arity =
+      id == function_id::mo_decimal_negate || id == function_id::mo_decimal_cast ? 1u : 2u;
+    auto const name = to_duckdb_function_name(id);
+    CAPTURE(name);
+    CHECK(from_duckdb_function_name(name, arity) == id);
+    CHECK_FALSE(from_duckdb_function_name(name, arity - 1));
+    CHECK_FALSE(from_duckdb_function_name(name, arity + 1));
+  }
 }

@@ -43,7 +43,10 @@ namespace sirius::pipeline {
  */
 class completion_handler {
  public:
-  explicit completion_handler(std::shared_ptr<embedding::execution_stats> stats) : execution_stats_(std::move(stats)) {}
+  explicit completion_handler(std::shared_ptr<embedding::execution_stats> stats)
+    : execution_stats_(std::move(stats))
+  {
+  }
   explicit completion_handler(std::function<void(std::exception_ptr)> on_error = {})
     : on_error_(std::move(on_error))
   {

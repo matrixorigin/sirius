@@ -279,7 +279,8 @@ void inspect_message(duckdb::google::protobuf::Message const& message,
     auto const& function = static_cast<substrait::Expression_ScalarFunction const&>(message);
     auto found           = functions.find(function.function_reference());
     auto exact           = found == functions.end() ? std::optional<function_id>{}
-                                                    : from_duckdb_function_name("__sirius_" + found->second);
+                                                    : from_duckdb_function_name("__sirius_" + found->second,
+                                                                      function.arguments_size());
     bool numeric         = exact && mo_decimal::is_decimal_function(*exact) &&
                    profile.functions.contains(function.function_reference());
     if (found == functions.end() || (!numeric && !supported_scalar_function(found->second)))

@@ -136,8 +136,8 @@ class importer {
         }
         if (value.GetExpressionClass() == duckdb::ExpressionClass::BOUND_FUNCTION) {
           auto const& function = value.Cast<duckdb::BoundFunctionExpression>();
-          auto id =
-            sirius::from_duckdb_function_name(function.Function().GetName().GetIdentifierName());
+          auto id              = sirius::from_duckdb_function_name(
+            function.Function().GetName().GetIdentifierName(), function.GetChildren().size());
           if (id && sirius::mo_decimal::is_decimal_function(*id)) {
             found = sirius::ast::from_duckdb(value);
             return;

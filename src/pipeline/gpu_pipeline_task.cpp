@@ -316,17 +316,16 @@ void synchronize_after_exception(::cuda::stream_ref stream, const sirius_pipelin
   }
 }
 
-void run_one_operator(
-  op::sirius_physical_operator& op,
-  const op::operator_data& operator_input_data,
-  std::unique_ptr<op::operator_data>& materialized_input_data,
-  std::unique_ptr<op::operator_data>& operator_output_data,
-  ::cuda::stream_ref stream,
-  const sirius_pipeline* pipeline,
-  uint64_t task_id,
-  size_t num_operators,
-  cucascade::memory::reservation_aware_resource_adaptor* allocator,
-  cucascade::memory::memory_space const* host_staging_space)
+void run_one_operator(op::sirius_physical_operator& op,
+                      const op::operator_data& operator_input_data,
+                      std::unique_ptr<op::operator_data>& materialized_input_data,
+                      std::unique_ptr<op::operator_data>& operator_output_data,
+                      ::cuda::stream_ref stream,
+                      const sirius_pipeline* pipeline,
+                      uint64_t task_id,
+                      size_t num_operators,
+                      cucascade::memory::reservation_aware_resource_adaptor* allocator,
+                      cucascade::memory::memory_space const* host_staging_space)
 {
   log_operator_data(op, operator_input_data, pipeline, task_id, "executing on");
 
@@ -339,7 +338,7 @@ void run_one_operator(
       materialize_deferred_input(op, operator_input_data, stream, host_staging_space);
     auto const& effective_input =
       materialized_input_data ? *materialized_input_data : operator_input_data;
-    operator_output_data        = op.execute(effective_input, stream);
+    operator_output_data = op.execute(effective_input, stream);
   } catch (const std::exception& ex) {
     // Both the original input and any restored deferred input are still alive here. Quiesce the
     // stream before rethrowing lets their owners unwind only after their last GPU reader finishes.
